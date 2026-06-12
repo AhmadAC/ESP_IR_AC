@@ -222,9 +222,7 @@ static esp_err_t save_post_handler(httpd_req_t *req) {
 
 void start_ap_server() {
     ESP_LOGI(TAG, "Starting AP Mode...");
-    esp_netif_create_default_wifi_ap();
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    esp_wifi_init(&cfg);
+    
     wifi_config_t wifi_config = {};
     strcpy((char*)wifi_config.ap.ssid, "ESP32_Config");
     strcpy((char*)wifi_config.ap.password, "12345678");
@@ -232,18 +230,23 @@ void start_ap_server() {
     wifi_config.ap.channel = 1;
     wifi_config.ap.max_connection = 4;
     wifi_config.ap.authmode = WIFI_AUTH_WPA2_PSK;
-    esp_wifi_set_mode(WIFI_MODE_APSTA);
-    esp_wifi_set_config(WIFI_IF_AP, &wifi_config);
-    esp_wifi_start();
 
-    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    if (httpd_start(&server, &config) == ESP_OK) {
-        httpd_uri_t uri_index = { .uri = "/", .method = HTTP_GET, .handler = index_get_handler, .user_ctx = NULL };
-        httpd_uri_t uri_scan = { .uri = "/scan", .method = HTTP_GET, .handler = scan_get_handler, .user_ctx = NULL };
-        httpd_uri_t uri_save = { .uri = "/save", .method = HTTP_POST, .handler = save_post_handler, .user_ctx = NULL };
-        httpd_register_uri_handler(server, &uri_index);
-        httpd_register_uri_handler(server, &uri_scan);
-        httpd_register_uri_handler(server, &uri_save);
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &wifi_config));
+    ESP_ERROR_CHECK(esp_wifi_start());
+
+    // Start Web Server if it is not already running
+    if (server == NULL) {
+        httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+        if (httpd_start(&server, &config) == ESP_OK) {
+            httpd_uri_t uri_index = { .uri = "/", .method = HTTP_GET, .handler = index_get_handler, .user_ctx = NULL };
+            httpd_uri_t uri_scan = { .uri = "/scan", .method = HTTP_GET, .handler = scan_get_handler, .user_ctx = NULL };
+            httpd_uri_t uri_save = { .uri = "/save", .method = HTTP_POST, .handler = save_post_handler, .user_ctx = NULL };
+            httpd_register_uri_handler(server, &uri_index);
+            httpd_register_uri_handler(server, &uri_scan);
+            httpd_register_uri_handler(server, &uri_save);
+            ESP_LOGI(TAG, "Config Web Server started successfully on port %d", config.server_port);
+        }
     }
 }
 
@@ -272,34 +275,49 @@ extern "C" void app_main(void) {
         ESP_ERROR_CHECK(nvs_flash_init());
     }
 
-    esp_netif_init();
-    esp_event_loop_create_default();
+    // 1. Initialize TCP/IP and Event Loop once
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    // 2. Create default network interfaces once (Both STA and AP can safely co-exist)
+    esp_netif_create_default_wifi_sta();
+    esp_netif_create_default_wifi_ap();
+
+    // 3. Initialize the Wi-Fi driver once
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
     // Init UART for IR Module
     init_uart();
 
-    // Auto-Connect to Wi-Fi if credentials exist
+    // 4. Auto-Connect to Wi-Fi if credentials exist
     nvs_handle_t my_handle;
+    bool has_credentials = false;
     if (nvs_open("storage", NVS_READONLY, &my_handle) == ESP_OK) {
         char ssid[32]; char pass[64];
         size_t s_len = sizeof(ssid); size_t p_len = sizeof(pass);
         if (nvs_get_str(my_handle, "wifi_ssid", ssid, &s_len) == ESP_OK &&
             nvs_get_str(my_handle, "wifi_pass", pass, &p_len) == ESP_OK) {
-            esp_netif_create_default_wifi_sta();
-            wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-            esp_wifi_init(&cfg);
-            esp_wifi_set_mode(WIFI_MODE_STA);
+            
+            ESP_LOGI(TAG, "Connecting to saved network: %s", ssid);
             wifi_config_t wifi_config = {};
             strcpy((char*)wifi_config.sta.ssid, ssid);
             strcpy((char*)wifi_config.sta.password, pass);
-            esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
-            esp_wifi_start();
+            
+            ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+            ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+            ESP_ERROR_CHECK(esp_wifi_start());
             esp_wifi_connect();
+            has_credentials = true;
         }
         nvs_close(my_handle);
     }
 
-    // Init BLE Port (HCI transport layer + controller is automatically handled in NimBLE v5.0+)
+    if (!has_credentials) {
+        ESP_LOGI(TAG, "No Wi-Fi credentials found. Press the physical BOOT button on your board to configure.");
+    }
+
+    // 5. Init BLE Port (HCI transport layer + controller is automatically handled in NimBLE v5.0+)
     ret = nimble_port_init();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize NimBLE port: %d", ret);
@@ -314,6 +332,6 @@ extern "C" void app_main(void) {
     ble_hs_cfg.sync_cb = ble_app_on_sync;
     nimble_port_freertos_init(host_task);
 
-    // Boot Button Listener
+    // 6. Start Boot Button Listener
     xTaskCreate(boot_button_task, "button_task", 2048, NULL, 10, NULL);
 }
