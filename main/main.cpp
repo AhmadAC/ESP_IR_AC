@@ -14,7 +14,6 @@
 #include "cJSON.h"
 
 // BLE Headers
-#include "esp_nimble_hci.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "host/ble_hs.h"
@@ -30,12 +29,8 @@ static const char *TAG = "AC_CTRL";
 static uint8_t own_addr_type;
 httpd_handle_t server = NULL;
 
-// UUIDs for BLE
-static const ble_uuid128_t gatt_svr_svc_uuid = BLE_UUID128_INIT(0xf0, 0xde, 0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12, 0x78, 0x56, 0x34, 0x12, 0x78, 0x56, 0x34, 0x12);
-static const ble_uuid128_t gatt_svr_chr_uuid = BLE_UUID128_INIT(0xf1, 0xde, 0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12, 0x78, 0x56, 0x34, 0x12, 0x78, 0x56, 0x34, 0x12);
-
 /* ==============================================
-   RAW IR MIDEA CODES (Provided from prompt)
+   RAW IR MIDEA CODES
    ============================================== */
 const uint8_t ir_off[] = {
     0xA5, 0x04, 0xA7, 0x04, 0x42, 0xCE, 0x01, 0x3E, 0x4A, 0x3F, 0xD1, 0x01, 0x3C, 0xD4, 0x01, 0x3C, 0x4A, 0x3B, 0x4A, 0x3B, 0xD4, 0x01, 0x3A, 0x4C, 0x3B, 0x4A, 0x3F, 0xD1, 0x01, 0x38, 0x4E, 0x3A, 0x4C, 0x3A, 0xD6, 0x01, 0x3A, 0xD6, 0x01, 0x3F, 0x47, 0x3B, 0xD4, 0x01, 0x3F, 0x46, 0x3A, 0xD6, 0x01, 0x38, 0xD7, 0x01, 0x3A, 0xD6, 0x01, 0x3B, 0xD4, 0x01, 0x3B, 0x4A, 0x3B, 0xD4, 0x01, 0x3A, 0xD6, 0x01, 0x3B, 0xD4, 0x01, 0x3A, 0x4C, 0x3A, 0x4C, 0x3A, 0x4C, 0x3C, 0x4A, 0x3A, 0xD6, 0x01, 0x3F, 0x47, 0x3B, 0x4A, 0x3A, 0xD6, 0x01, 0x3A, 0xD6, 0x01, 0x3A, 0xD6, 0x01, 0x3A, 0x4C, 0x3A, 0x4C, 0x3B, 0x4A, 0x3A, 0x4C, 0x3A, 0x4C, 0x3A, 0x4C, 0x39, 0x4C, 0x3B, 0x4A, 0x3B, 0xD4, 0x01, 0x3A, 0xD6, 0x01, 0x3A, 0xD6, 0x01, 0x3A, 0xD6, 0x01, 0x3A, 0xD6, 0x01, 0x3B, 0x93, 0x05, 0xA1, 0x04, 0xAD, 0x04, 0x39, 0xD6, 0x01, 0x3B, 0x4A, 0x3B, 0xD4, 0x01, 0x39, 0xD6, 0x01, 0x39, 0x4C, 0x3A, 0x4C, 0x39, 0xD6, 0x01, 0x3A, 0x4C, 0x3A, 0x4C, 0x3A, 0xD6, 0x01, 0x3A, 0x4C, 0x3A, 0x4C, 0x3C, 0xD4, 0x01, 0x3A, 0xD6, 0x01, 0x3A, 0x4B, 0x3A, 0xD6, 0x01, 0x3A, 0x4C, 0x3A, 0xD6, 0x01, 0x3B, 0xD4, 0x01, 0x3A, 0xD6, 0x01, 0x3A, 0xD6, 0x01, 0x3A, 0x4C, 0x3C, 0xD4, 0x01, 0x3F, 0xD0, 0x01, 0x3A, 0xD6, 0x01, 0x3A, 0x4C, 0x3C, 0x4A, 0x39, 0x4C, 0x3A, 0x4C, 0x3B, 0xD4, 0x01, 0x3A, 0x4C, 0x3A, 0x4C, 0x39, 0xD6, 0x01, 0x3B, 0xD4, 0x01, 0x3C, 0xD4, 0x01, 0x39, 0x4C, 0x3B, 0x4A, 0x3C, 0x4A, 0x3A, 0x4C, 0x3B, 0x4A, 0x3A, 0x4C, 0x3A, 0x4C, 0x3A, 0x4C, 0x3A, 0xD6, 0x01, 0x3A, 0xD6, 0x01, 0x3C, 0xD4, 0x01, 0x3B, 0xD4, 0x01, 0x3A, 0xD5, 0x01, 0x3C
@@ -57,22 +52,20 @@ const uint8_t ir_24c[] = {
    UART / IR MODULE COMMUNICATION
    ============================================== */
 void init_uart() {
-    uart_config_t uart_config = {
-        .baud_rate = 115200,
-        .data_bits = UART_DATA_8_BITS,
-        .parity = UART_PARITY_DISABLE,
-        .stop_bits = UART_STOP_BITS_1,
-        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
-        .rx_flow_ctrl_thresh = 0,
-        .source_clk = UART_SCLK_DEFAULT,
-    };
+    uart_config_t uart_config = {};
+    uart_config.baud_rate = 115200;
+    uart_config.data_bits = UART_DATA_8_BITS;
+    uart_config.parity = UART_PARITY_DISABLE;
+    uart_config.stop_bits = UART_STOP_BITS_1;
+    uart_config.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
+    uart_config.source_clk = UART_SCLK_DEFAULT;
+
     ESP_ERROR_CHECK(uart_driver_install(UART_PORT_NUM, 1024, 0, 0, NULL, 0));
     ESP_ERROR_CHECK(uart_param_config(UART_PORT_NUM, &uart_config));
     ESP_ERROR_CHECK(uart_set_pin(UART_PORT_NUM, TXD_PIN, RXD_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
     ESP_LOGI(TAG, "UART initialized to interface with IR Learning Module.");
 }
 
-// Sends the data array inside the 68H protocol required by the ZJIOT module
 void send_uart_ir(const uint8_t* data, size_t data_len) {
     size_t frame_len = data_len + 7;
     uint8_t* frame = (uint8_t*)malloc(frame_len);
@@ -93,10 +86,9 @@ void send_uart_ir(const uint8_t* data, size_t data_len) {
     frame[6 + data_len] = 0x16;           // Frame Tail
 
     uart_write_bytes(UART_PORT_NUM, (const char*)frame, frame_len);
-    ESP_LOGI(TAG, "Sent IR Command via UART (Length: %d)", frame_len);
+    ESP_LOGI(TAG, "Sent IR Command via UART (Length: %zu)", frame_len);
     free(frame);
 }
-
 
 /* ==============================================
    BLE SERVER CODE
@@ -113,6 +105,12 @@ static int gatt_svr_chr_write(uint16_t conn_handle, uint16_t attr_handle, struct
     return 0;
 }
 
+// Ignore unused warnings on struct initializers for the BLE table
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+static const ble_uuid128_t gatt_svr_svc_uuid = BLE_UUID128_INIT(0xf0, 0xde, 0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12, 0x78, 0x56, 0x34, 0x12, 0x78, 0x56, 0x34, 0x12);
+static const ble_uuid128_t gatt_svr_chr_uuid = BLE_UUID128_INIT(0xf1, 0xde, 0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12, 0x78, 0x56, 0x34, 0x12, 0x78, 0x56, 0x34, 0x12);
+
 static const struct ble_gatt_svc_def gatt_svr_svcs[] = {
     {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
@@ -123,11 +121,12 @@ static const struct ble_gatt_svc_def gatt_svr_svcs[] = {
         },
     }, { 0 }
 };
+#pragma GCC diagnostic pop
 
 static void ble_app_on_sync(void) {
     ble_hs_id_infer_auto(0, &own_addr_type);
-    struct ble_gap_adv_params adv_params = {0};
-    struct ble_hs_adv_fields fields = {0};
+    struct ble_gap_adv_params adv_params = {};
+    struct ble_hs_adv_fields fields = {};
     fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
     fields.name = (uint8_t *)"ESP32_AC_CTRL";
     fields.name_len = strlen("ESP32_AC_CTRL");
@@ -140,7 +139,7 @@ static void ble_app_on_sync(void) {
 
 void host_task(void *param) {
     nimble_port_run();
-    nimble_port_freertos_return();
+    nimble_port_freertos_deinit();
 }
 
 /* ==============================================
@@ -182,7 +181,7 @@ static esp_err_t index_get_handler(httpd_req_t *req) {
 }
 
 static esp_err_t scan_get_handler(httpd_req_t *req) {
-    wifi_scan_config_t scan_config = {0};
+    wifi_scan_config_t scan_config = {};
     esp_wifi_scan_start(&scan_config, true);
     uint16_t ap_count = 0;
     esp_wifi_scan_get_ap_num(&ap_count);
@@ -200,7 +199,8 @@ static esp_err_t scan_get_handler(httpd_req_t *req) {
 static esp_err_t save_post_handler(httpd_req_t *req) {
     char buf[200];
     int ret, remaining = req->content_len;
-    if ((ret = httpd_req_recv(req, buf, MIN(remaining, sizeof(buf)))) <= 0) return ESP_FAIL;
+    size_t recv_len = (remaining < (int)sizeof(buf)) ? remaining : (int)sizeof(buf);
+    if ((ret = httpd_req_recv(req, buf, recv_len)) <= 0) return ESP_FAIL;
     buf[ret] = '\0';
     cJSON *json = cJSON_Parse(buf);
     if(json) {
@@ -299,9 +299,13 @@ extern "C" void app_main(void) {
         nvs_close(my_handle);
     }
 
-    // Init BLE
-    ESP_ERROR_CHECK(esp_nimble_hci_and_controller_init());
-    nimble_port_init();
+    // Init BLE Port (HCI transport layer + controller is automatically handled in NimBLE v5.0+)
+    ret = nimble_port_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize NimBLE port: %d", ret);
+        return;
+    }
+
     ble_svc_gap_device_name_set("ESP32_AC_CTRL");
     ble_svc_gap_init();
     ble_svc_gatt_init();
