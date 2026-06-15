@@ -1,7 +1,8 @@
+# AcController.py
 import sys
 import asyncio
 from PySide6.QtWidgets import QApplication, QMainWindow, QPushButton, QLabel, QVBoxLayout, QWidget
-from PySide6.QtCore import QThread, Signal, Slot
+from PySide6.QtCore import QThread, Signal, Slot, QEventLoop, Qt
 from bleak import BleakClient, BleakScanner
 
 DEVICE_NAME = "ESP32_AC_CTRL"
@@ -117,8 +118,28 @@ class MainWindow(QMainWindow):
         self.ble_worker.wait()
         event.accept()
 
-if __name__ == "__main__":
-    app = QApplication(sys.argv)
+def main():
+    # Detect if a QApplication instance already exists
+    app = QApplication.instance()
+    is_standalone = False
+    
+    if not app:
+        app = QApplication(sys.argv)
+        is_standalone = True
+
     window = MainWindow()
-    window.show()
-    sys.exit(app.exec())
+    
+    if is_standalone:
+        window.show()
+        sys.exit(app.exec())
+    else:
+        # If run from inside Comb.py, block the calling thread using a local event loop
+        # so that the window isn't instantly garbage-collected when main() returns.
+        window.setAttribute(Qt.WA_DeleteOnClose)
+        loop = QEventLoop()
+        window.destroyed.connect(loop.quit)
+        window.show()
+        loop.exec()
+
+if __name__ == "__main__":
+    main()
