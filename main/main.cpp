@@ -12,22 +12,18 @@
 #include "driver/gpio.h"
 #include "driver/uart.h"
 #include "cJSON.h"
-
-// BLE Headers
-#include "nimble/nimble_port.h"
-#include "nimble/nimble_port_freertos.h"
-#include "host/ble_hs.h"
-#include "services/gap/ble_svc_gap.h"
-#include "services/gatt/ble_svc_gatt.h"
+#include "mdns.h"
 
 #define UART_PORT_NUM UART_NUM_1
 #define TXD_PIN (GPIO_NUM_17) // Wire to IR Module RXD
 #define RXD_PIN (GPIO_NUM_18) // Wire to IR Module TXD
 #define BOOT_BUTTON_PIN GPIO_NUM_0 
+#define MAXIMUM_RETRY 5
 
 static const char *TAG = "AC_CTRL";
-static uint8_t own_addr_type;
 httpd_handle_t server = NULL;
+static int s_retry_num = 0;
+static bool s_ap_fallback_active = false;
 
 /* ==============================================
    RAW IR MIDEA CODES
@@ -91,59 +87,7 @@ void send_uart_ir(const uint8_t* data, size_t data_len) {
 }
 
 /* ==============================================
-   BLE SERVER CODE
-   ============================================== */
-static int gatt_svr_chr_write(uint16_t conn_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt, void *arg) {
-    if (ctxt->om->om_len > 0) {
-        uint8_t command = ctxt->om->om_data[0];
-        ESP_LOGI(TAG, "Received BLE command: %d", command);
-        if (command == 0) send_uart_ir(ir_off, sizeof(ir_off));
-        else if (command == 1) send_uart_ir(ir_on, sizeof(ir_on));
-        else if (command == 2) send_uart_ir(ir_19c, sizeof(ir_19c));
-        else if (command == 3) send_uart_ir(ir_24c, sizeof(ir_24c));
-    }
-    return 0;
-}
-
-// Ignore unused warnings on struct initializers for the BLE table
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
-static const ble_uuid128_t gatt_svr_svc_uuid = BLE_UUID128_INIT(0xf0, 0xde, 0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12, 0x78, 0x56, 0x34, 0x12, 0x78, 0x56, 0x34, 0x12);
-static const ble_uuid128_t gatt_svr_chr_uuid = BLE_UUID128_INIT(0xf1, 0xde, 0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12, 0x78, 0x56, 0x34, 0x12, 0x78, 0x56, 0x34, 0x12);
-
-static const struct ble_gatt_svc_def gatt_svr_svcs[] = {
-    {
-        .type = BLE_GATT_SVC_TYPE_PRIMARY,
-        .uuid = &gatt_svr_svc_uuid.u,
-        .characteristics = (struct ble_gatt_chr_def[]) {
-            { .uuid = &gatt_svr_chr_uuid.u, .access_cb = gatt_svr_chr_write, .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP },
-            { 0 }
-        },
-    }, { 0 }
-};
-#pragma GCC diagnostic pop
-
-static void ble_app_on_sync(void) {
-    ble_hs_id_infer_auto(0, &own_addr_type);
-    struct ble_gap_adv_params adv_params = {};
-    struct ble_hs_adv_fields fields = {};
-    fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
-    fields.name = (uint8_t *)"ESP32_AC_CTRL";
-    fields.name_len = strlen("ESP32_AC_CTRL");
-    fields.name_is_complete = 1;
-    ble_gap_adv_set_fields(&fields);
-    adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;
-    adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
-    ble_gap_adv_start(own_addr_type, NULL, BLE_HS_FOREVER, &adv_params, NULL, NULL);
-}
-
-void host_task(void *param) {
-    nimble_port_run();
-    nimble_port_freertos_deinit();
-}
-
-/* ==============================================
-   WIFI AP & HTTP SERVER (PROVISIONING)
+   HTTP SERVER (CONTROL & PROVISIONING)
    ============================================== */
 void delayed_reboot_task(void *pvParameter) {
     vTaskDelay(pdMS_TO_TICKS(2000));
@@ -152,8 +96,13 @@ void delayed_reboot_task(void *pvParameter) {
 
 static esp_err_t index_get_handler(httpd_req_t *req) {
     const char* html = 
-        "<!DOCTYPE html><html><head><title>ESP32 Wi-Fi Setup</title><meta name='viewport' content='width=device-width, initial-scale=1'></head>"
+        "<!DOCTYPE html><html><head><title>ESP32 A/C Controller</title><meta name='viewport' content='width=device-width, initial-scale=1'>"
+        "<style>button{padding:10px;margin:5px;font-size:16px;}</style></head>"
         "<body style='font-family:sans-serif; margin:20px;'>"
+        "<h2>Control A/C</h2>"
+        "<button onclick='c(0)'>Turn OFF</button> <button onclick='c(1)'>Turn ON</button><br>"
+        "<button onclick='c(2)'>Set 19&deg;C</button> <button onclick='c(3)'>Set 24&deg;C</button>"
+        "<p id='cstat'></p><hr>"
         "<h2>Wi-Fi Setup</h2>"
         "<button onclick='scan()'>Scan Networks</button><p id='status'></p>"
         "<div style='margin-bottom:10px;'><label>SSID:</label><br><select id='ssid'></select></div>"
@@ -161,6 +110,14 @@ static esp_err_t index_get_handler(httpd_req_t *req) {
         "<input type='checkbox' onclick=\"let p=document.getElementById('pass'); p.type=(p.type==='password')?'text':'password';\"> Show</div>"
         "<button onclick='save()'>Save & Reboot</button>"
         "<script>"
+        "function c(cmd) {"
+        "  document.getElementById('cstat').innerText = 'Sending...';"
+        "  fetch('/ir?cmd='+cmd).then(r=>r.text()).then(t=>{"
+        "    document.getElementById('cstat').innerText = 'Status: ' + t;"
+        "  }).catch(e=>{"
+        "    document.getElementById('cstat').innerText = 'Error: ' + e;"
+        "  });"
+        "}"
         "function scan() {"
         "  document.getElementById('status').innerText = 'Scanning...';"
         "  fetch('/scan').then(r=>r.json()).then(d=>{"
@@ -178,6 +135,25 @@ static esp_err_t index_get_handler(httpd_req_t *req) {
         "</script></body></html>";
     httpd_resp_send(req, html, HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
+}
+
+static esp_err_t ir_get_handler(httpd_req_t *req) {
+    char buf[50];
+    if (httpd_req_get_url_query_str(req, buf, sizeof(buf)) == ESP_OK) {
+        char param[10];
+        if (httpd_query_key_value(buf, "cmd", param, sizeof(param)) == ESP_OK) {
+            int cmd = atoi(param);
+            ESP_LOGI(TAG, "Received IR Web Command: %d", cmd);
+            if (cmd == 0) send_uart_ir(ir_off, sizeof(ir_off));
+            else if (cmd == 1) send_uart_ir(ir_on, sizeof(ir_on));
+            else if (cmd == 2) send_uart_ir(ir_19c, sizeof(ir_19c));
+            else if (cmd == 3) send_uart_ir(ir_24c, sizeof(ir_24c));
+            httpd_resp_sendstr(req, "Command Sent");
+            return ESP_OK;
+        }
+    }
+    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing cmd parameter");
+    return ESP_FAIL;
 }
 
 static esp_err_t scan_get_handler(httpd_req_t *req) {
@@ -220,6 +196,23 @@ static esp_err_t save_post_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+void start_web_server() {
+    if (server == NULL) {
+        httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+        if (httpd_start(&server, &config) == ESP_OK) {
+            httpd_uri_t uri_index = { .uri = "/", .method = HTTP_GET, .handler = index_get_handler, .user_ctx = NULL };
+            httpd_uri_t uri_scan = { .uri = "/scan", .method = HTTP_GET, .handler = scan_get_handler, .user_ctx = NULL };
+            httpd_uri_t uri_save = { .uri = "/save", .method = HTTP_POST, .handler = save_post_handler, .user_ctx = NULL };
+            httpd_uri_t uri_ir   = { .uri = "/ir", .method = HTTP_GET, .handler = ir_get_handler, .user_ctx = NULL };
+            httpd_register_uri_handler(server, &uri_index);
+            httpd_register_uri_handler(server, &uri_scan);
+            httpd_register_uri_handler(server, &uri_save);
+            httpd_register_uri_handler(server, &uri_ir);
+            ESP_LOGI(TAG, "Web Server started successfully on port %d", config.server_port);
+        }
+    }
+}
+
 void start_ap_server() {
     ESP_LOGI(TAG, "Starting AP Mode...");
     
@@ -235,19 +228,7 @@ void start_ap_server() {
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    // Start Web Server if it is not already running
-    if (server == NULL) {
-        httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-        if (httpd_start(&server, &config) == ESP_OK) {
-            httpd_uri_t uri_index = { .uri = "/", .method = HTTP_GET, .handler = index_get_handler, .user_ctx = NULL };
-            httpd_uri_t uri_scan = { .uri = "/scan", .method = HTTP_GET, .handler = scan_get_handler, .user_ctx = NULL };
-            httpd_uri_t uri_save = { .uri = "/save", .method = HTTP_POST, .handler = save_post_handler, .user_ctx = NULL };
-            httpd_register_uri_handler(server, &uri_index);
-            httpd_register_uri_handler(server, &uri_scan);
-            httpd_register_uri_handler(server, &uri_save);
-            ESP_LOGI(TAG, "Config Web Server started successfully on port %d", config.server_port);
-        }
-    }
+    start_web_server();
 }
 
 void boot_button_task(void *pvParameter) {
@@ -257,11 +238,50 @@ void boot_button_task(void *pvParameter) {
         if (gpio_get_level(BOOT_BUTTON_PIN) == 0) {
             vTaskDelay(pdMS_TO_TICKS(50)); // Debounce
             if (gpio_get_level(BOOT_BUTTON_PIN) == 0) {
-                start_ap_server();
+                if (!s_ap_fallback_active) {
+                    s_ap_fallback_active = true;
+                    start_ap_server();
+                }
                 vTaskDelete(NULL);
             }
         }
         vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
+
+/* ==============================================
+   WIFI EVENT HANDLER & STATE MACHINE
+   ============================================== */
+static void wifi_event_handler(void* arg, esp_event_base_t event_base,
+                              int32_t event_id, void* event_data)
+{
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+        esp_wifi_connect();
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        if (s_ap_fallback_active) {
+            ESP_LOGI(TAG, "Disconnected from STA, but AP config portal is running. Retries paused.");
+            return;
+        }
+        if (s_retry_num < MAXIMUM_RETRY) {
+            esp_wifi_connect();
+            s_retry_num++;
+            ESP_LOGI(TAG, "Retrying connection to local Wi-Fi router (%d/%d)", s_retry_num, MAXIMUM_RETRY);
+        } else {
+            ESP_LOGW(TAG, "Connection failed. Launching AP Config Portal automatically.");
+            s_ap_fallback_active = true;
+            start_ap_server();
+        }
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
+        ESP_LOGI(TAG, "Successfully connected! Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
+        s_retry_num = 0;
+        
+        // Start mDNS and Control Server once connected and assigned an IP
+        ESP_ERROR_CHECK(mdns_init());
+        mdns_hostname_set("esp32-ac-ctrl");
+        mdns_instance_name_set("ESP32 AC Controller");
+        
+        start_web_server();
     }
 }
 
@@ -275,22 +295,31 @@ extern "C" void app_main(void) {
         ESP_ERROR_CHECK(nvs_flash_init());
     }
 
-    // 1. Initialize TCP/IP and Event Loop once
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
-    // 2. Create default network interfaces once (Both STA and AP can safely co-exist)
     esp_netif_create_default_wifi_sta();
     esp_netif_create_default_wifi_ap();
 
-    // 3. Initialize the Wi-Fi driver once
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
-    // Init UART for IR Module
+    // Register Event Handlers to track connect/disconnect statuses
+    esp_event_handler_instance_t instance_any_id;
+    esp_event_handler_instance_t instance_got_ip;
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
+                                                        ESP_EVENT_ANY_ID,
+                                                        &wifi_event_handler,
+                                                        NULL,
+                                                        &instance_any_id));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
+                                                        IP_EVENT_STA_GOT_IP,
+                                                        &wifi_event_handler,
+                                                        NULL,
+                                                        &instance_got_ip));
+
     init_uart();
 
-    // 4. Auto-Connect to Wi-Fi if credentials exist
     nvs_handle_t my_handle;
     bool has_credentials = false;
     if (nvs_open("storage", NVS_READONLY, &my_handle) == ESP_OK) {
@@ -299,7 +328,7 @@ extern "C" void app_main(void) {
         if (nvs_get_str(my_handle, "wifi_ssid", ssid, &s_len) == ESP_OK &&
             nvs_get_str(my_handle, "wifi_pass", pass, &p_len) == ESP_OK) {
             
-            ESP_LOGI(TAG, "Connecting to saved network: %s", ssid);
+            ESP_LOGI(TAG, "Saved network credentials found. Initializing connection sequence to: %s", ssid);
             wifi_config_t wifi_config = {};
             strcpy((char*)wifi_config.sta.ssid, ssid);
             strcpy((char*)wifi_config.sta.password, pass);
@@ -307,31 +336,18 @@ extern "C" void app_main(void) {
             ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
             ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
             ESP_ERROR_CHECK(esp_wifi_start());
-            esp_wifi_connect();
             has_credentials = true;
         }
         nvs_close(my_handle);
     }
 
+    // Fallback directly to AP mode if no settings are configured
     if (!has_credentials) {
-        ESP_LOGI(TAG, "No Wi-Fi credentials found. Press the physical BOOT button on your board to configure.");
+        ESP_LOGW(TAG, "No Wi-Fi credentials found in memory. Launching AP Config Portal...");
+        s_ap_fallback_active = true;
+        start_ap_server();
     }
 
-    // 5. Init BLE Port (HCI transport layer + controller is automatically handled in NimBLE v5.0+)
-    ret = nimble_port_init();
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to initialize NimBLE port: %d", ret);
-        return;
-    }
-
-    ble_svc_gap_device_name_set("ESP32_AC_CTRL");
-    ble_svc_gap_init();
-    ble_svc_gatt_init();
-    ble_gatts_count_cfg(gatt_svr_svcs);
-    ble_gatts_add_svcs(gatt_svr_svcs);
-    ble_hs_cfg.sync_cb = ble_app_on_sync;
-    nimble_port_freertos_init(host_task);
-
-    // 6. Start Boot Button Listener
+    // Start Boot Button Listener (Allows forcing configuration mode)
     xTaskCreate(boot_button_task, "button_task", 2048, NULL, 10, NULL);
 }
