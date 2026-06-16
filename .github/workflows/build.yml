@@ -84,5 +84,5 @@ jobs:
       - name: Upload ESP-IDF Compiled Binaries
         uses: actions/upload-artifact@v4
         with:
-          name: esp32-ac-controller-binaries
+          name: esp32-s3-ac-controller-binaries
           path: build_out/

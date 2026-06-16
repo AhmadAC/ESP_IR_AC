@@ -24,6 +24,7 @@ static const char *TAG = "AC_CTRL";
 httpd_handle_t server = NULL;
 static int s_retry_num = 0;
 static bool s_ap_fallback_active = false;
+char last_command_str[32] = "None";
 
 /* ==============================================
    RAW IR MIDEA CODES
@@ -95,11 +96,13 @@ void delayed_reboot_task(void *pvParameter) {
 }
 
 static esp_err_t index_get_handler(httpd_req_t *req) {
-    const char* html = 
+    char *html = (char *)malloc(2500);
+    snprintf(html, 2500,
         "<!DOCTYPE html><html><head><title>ESP32 A/C Controller</title><meta name='viewport' content='width=device-width, initial-scale=1'>"
         "<style>button{padding:10px;margin:5px;font-size:16px;}</style></head>"
         "<body style='font-family:sans-serif; margin:20px;'>"
         "<h2>Control A/C</h2>"
+        "<p><b>Last Command:</b> <span id='lastcmd' style='color:#007BFF;'>%s</span></p>"
         "<button onclick='c(0)'>Turn OFF</button> <button onclick='c(1)'>Turn ON</button><br>"
         "<button onclick='c(2)'>Set 19&deg;C</button> <button onclick='c(3)'>Set 24&deg;C</button>"
         "<p id='cstat'></p><hr>"
@@ -114,6 +117,7 @@ static esp_err_t index_get_handler(httpd_req_t *req) {
         "  document.getElementById('cstat').innerText = 'Sending...';"
         "  fetch('/ir?cmd='+cmd).then(r=>r.text()).then(t=>{"
         "    document.getElementById('cstat').innerText = 'Status: ' + t;"
+        "    setTimeout(() => location.reload(), 600);"
         "  }).catch(e=>{"
         "    document.getElementById('cstat').innerText = 'Error: ' + e;"
         "  });"
@@ -132,8 +136,10 @@ static esp_err_t index_get_handler(httpd_req_t *req) {
         "  fetch('/save', {method:'POST', body:JSON.stringify({ssid:s, pass:p})})"
         "  .then(()=>{ alert('Credentials saved! ESP32 rebooting in 2 seconds.'); });"
         "}"
-        "</script></body></html>";
+        "</script></body></html>", last_command_str);
+    
     httpd_resp_send(req, html, HTTPD_RESP_USE_STRLEN);
+    free(html);
     return ESP_OK;
 }
 
@@ -144,10 +150,22 @@ static esp_err_t ir_get_handler(httpd_req_t *req) {
         if (httpd_query_key_value(buf, "cmd", param, sizeof(param)) == ESP_OK) {
             int cmd = atoi(param);
             ESP_LOGI(TAG, "Received IR Web Command: %d", cmd);
-            if (cmd == 0) send_uart_ir(ir_off, sizeof(ir_off));
-            else if (cmd == 1) send_uart_ir(ir_on, sizeof(ir_on));
-            else if (cmd == 2) send_uart_ir(ir_19c, sizeof(ir_19c));
-            else if (cmd == 3) send_uart_ir(ir_24c, sizeof(ir_24c));
+            if (cmd == 0) {
+                strcpy(last_command_str, "AC OFF");
+                send_uart_ir(ir_off, sizeof(ir_off));
+            }
+            else if (cmd == 1) {
+                strcpy(last_command_str, "AC ON");
+                send_uart_ir(ir_on, sizeof(ir_on));
+            }
+            else if (cmd == 2) {
+                strcpy(last_command_str, "Set 19C");
+                send_uart_ir(ir_19c, sizeof(ir_19c));
+            }
+            else if (cmd == 3) {
+                strcpy(last_command_str, "Set 24C");
+                send_uart_ir(ir_24c, sizeof(ir_24c));
+            }
             httpd_resp_sendstr(req, "Command Sent");
             return ESP_OK;
         }
@@ -280,6 +298,7 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
         ESP_ERROR_CHECK(mdns_init());
         mdns_hostname_set("esp32-ac-ctrl");
         mdns_instance_name_set("ESP32 AC Controller");
+        mdns_service_add("ESP32 AC Controller", "_http", "_tcp", 80, NULL, 0); // Advertise the HTTP service for discovery!
         
         start_web_server();
     }
