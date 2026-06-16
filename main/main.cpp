@@ -298,7 +298,7 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
         ESP_ERROR_CHECK(mdns_init());
         mdns_hostname_set("esp32-ac-ctrl");
         mdns_instance_name_set("ESP32 AC Controller");
-        mdns_service_add("ESP32 AC Controller", "_http", "_tcp", 80, NULL, 0); // Advertise the HTTP service for discovery!
+        mdns_service_add("ESP32 AC Controller", "http", "tcp", 80, NULL, 0); // Advertise the HTTP service for discovery!
         
         start_web_server();
     }
