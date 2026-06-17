@@ -50,7 +50,7 @@ class MainWindow(QMainWindow):
 
         # UI Elements
         self.host_input = QLineEdit(self)
-        self.host_input.setText("http://esp32-ac-ctrl.local")
+        self.host_input.setText("172.30.50.117")
         self.host_input.setPlaceholderText("ESP32 IP or Hostname")
         self.host_input.setToolTip("Use the local mDNS name or the IP address directly.")
         
