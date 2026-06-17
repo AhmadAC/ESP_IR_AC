@@ -1,3 +1,4 @@
+// main/main.cpp
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -158,7 +159,8 @@ void timer_task(void *pvParameter) {
     while(1) {
         time_t now = 0;
         time(&now);
-        struct tm timeinfo = {0};
+        struct tm timeinfo;
+        memset(&timeinfo, 0, sizeof(timeinfo));
         localtime_r(&now, &timeinfo);
         
         if (timeinfo.tm_year > (2020 - 1900)) { // Valid time acquired
@@ -209,10 +211,10 @@ void time_sync_notification_cb(struct timeval *tv) {
 
 void initialize_sntp(void) {
     ESP_LOGI(TAG, "Initializing SNTP Engine...");
-    sntp_setoperatingmode(SNTP_OPMODE_POLL);
-    sntp_setservername(0, "pool.ntp.org");
-    sntp_set_time_sync_notification_cb(time_sync_notification_cb);
-    sntp_init();
+    esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL);
+    esp_sntp_setservername(0, "pool.ntp.org");
+    esp_sntp_set_time_sync_notification_cb(time_sync_notification_cb);
+    esp_sntp_init();
     
     // Set Timezone logic to UTC+8 (GMT+8)
     setenv("TZ", "UTC-8", 1);
@@ -229,13 +231,13 @@ void delayed_reboot_task(void *pvParameter) {
 }
 
 static esp_err_t index_get_handler(httpd_req_t *req) {
-    char *html = (char *)malloc(4096);
+    char *html = (char *)malloc(8192);
     if (!html) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
         return ESP_FAIL;
     }
     
-    snprintf(html, 4096,
+    snprintf(html, 8192,
         "<!DOCTYPE html><html><head><title>ESP32 A/C Controller</title>"
         "<meta name='viewport' content='width=device-width, initial-scale=1'>"
         "<style>body{font-family:sans-serif;margin:20px;}button{padding:10px;margin:5px;font-size:16px;}"
@@ -301,7 +303,8 @@ static esp_err_t ir_get_handler(httpd_req_t *req) {
 static esp_err_t status_get_handler(httpd_req_t *req) {
     time_t now = 0;
     time(&now);
-    struct tm timeinfo = {0};
+    struct tm timeinfo;
+    memset(&timeinfo, 0, sizeof(timeinfo));
     localtime_r(&now, &timeinfo);
     
     char time_str[64];
