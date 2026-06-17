@@ -217,7 +217,7 @@ void initialize_sntp(void) {
     esp_sntp_init();
     
     // Set Timezone logic to UTC+8 (GMT+8)
-    setenv("TZ", "UTC-8", 1);
+    setenv("TZ", "TZ=CST-8", 1);
     tzset();
 }
 
@@ -462,7 +462,7 @@ void start_web_server() {
 }
 
 void start_ap_server() {
-    ESP_LOGI(TAG, "Starting AP Mode...");
+    ESP_LOGI(TAG, "Configuring and Launching SoftAP Portal...");
     
     wifi_config_t wifi_config = {};
     strcpy((char*)wifi_config.ap.ssid, "ESP32_Config");
@@ -472,10 +472,14 @@ void start_ap_server() {
     wifi_config.ap.max_connection = 4;
     wifi_config.ap.authmode = WIFI_AUTH_WPA2_PSK;
 
+    // Safely stop Wi-Fi driver first to apply mode modifications cleanly 
+    esp_wifi_stop();
+
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
 
+    ESP_LOGI(TAG, "SoftAP broadcast started! SSID: ESP32_Config, WPA2 Password: 12345678");
     start_web_server();
 }
 
@@ -504,21 +508,30 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
                               int32_t event_id, void* event_data)
 {
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+        ESP_LOGI(TAG, "STA Interface started. Connecting...");
         esp_wifi_connect();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         if (s_ap_fallback_active) {
-            ESP_LOGI(TAG, "Disconnected from STA, but AP config portal is running. Retries paused.");
+            ESP_LOGI(TAG, "Disconnected from STA. Configuration portal is currently active.");
             return;
         }
         if (s_retry_num < MAXIMUM_RETRY) {
             esp_wifi_connect();
             s_retry_num++;
-            ESP_LOGI(TAG, "Retrying connection to local Wi-Fi router (%d/%d)", s_retry_num, MAXIMUM_RETRY);
+            ESP_LOGI(TAG, "Retrying connection to local router (%d/%d)", s_retry_num, MAXIMUM_RETRY);
         } else {
-            ESP_LOGW(TAG, "Connection failed. Launching AP Config Portal automatically.");
+            ESP_LOGW(TAG, "Connection attempts exhausted. Rolling back to AP Config Portal...");
             s_ap_fallback_active = true;
             start_ap_server();
         }
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_START) {
+        ESP_LOGI(TAG, "SoftAP mode interface is up.");
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_STACONNECTED) {
+        wifi_event_ap_staconnected_t* event = (wifi_event_ap_staconnected_t*) event_data;
+        ESP_LOGI(TAG, "Station " MACSTR " connected to SoftAP, AID=%d", MAC2STR(event->mac), event->aid);
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_STADISCONNECTED) {
+        wifi_event_ap_stadisconnected_t* event = (wifi_event_ap_stadisconnected_t*) event_data;
+        ESP_LOGI(TAG, "Station " MACSTR " disconnected from SoftAP, AID=%d", MAC2STR(event->mac), event->aid);
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
         ESP_LOGI(TAG, "Successfully connected! Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
