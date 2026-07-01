@@ -1,3 +1,3 @@
-idf_component_register(SRCS "main.cpp"
+idf_component_register(SRCS "main.cpp" "ir_codes.cpp"
                        INCLUDE_DIRS "."
                        REQUIRES nvs_flash esp_wifi esp_http_server json driver esp_netif mdns)
