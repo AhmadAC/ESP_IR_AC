@@ -3,6 +3,8 @@
 #include <string.h>
 #include <time.h>
 #include <sys/time.h>
+#include <unistd.h>
+#include <fcntl.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -776,6 +778,78 @@ void boot_button_task(void *pvParameter) {
 }
 
 /* ==============================================
+   REPL CONSOLE TASK
+   ============================================== */
+static void console_read_task(void *pvParameter) {
+    ESP_LOGI(TAG, "Native REPL Console Listener Task started.");
+    
+    int fd = fileno(stdin);
+    int flags = fcntl(fd, F_GETFL);
+    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+
+    uint8_t buf[64];
+    char cmd[64];
+    int cmd_idx = 0;
+    
+    while (1) {
+        int len = read(fd, buf, sizeof(buf));
+        if (len > 0) {
+            for (int i = 0; i < len; i++) {
+                if (buf[i] == 0x03) { // Ctrl+C (Interrupt)
+                    ESP_LOGW(TAG, "[Sent Ctrl+C - Interrupt (Sending AC OFF)]");
+                    execute_command(0); // Send AC OFF command as an emergency stop equivalent
+                } else if (buf[i] == 0x04) { // Ctrl+D (Soft Reboot)
+                    ESP_LOGW(TAG, "[Sent Ctrl+D - Soft Reboot]");
+                    vTaskDelay(pdMS_TO_TICKS(100));
+                    esp_restart();
+                } else if (buf[i] == '\r' || buf[i] == '\n') {
+                    if (cmd_idx > 0) {
+                        cmd[cmd_idx] = '\0';
+                        if (strcmp(cmd, "reset") == 0) {
+                            ESP_LOGW(TAG, "Command 'reset' received. Factory Resetting NVS...");
+                            nvs_handle_t h;
+                            if (nvs_open("storage", NVS_READWRITE, &h) == ESP_OK) {
+                                nvs_erase_all(h);
+                                nvs_commit(h);
+                                nvs_close(h);
+                            }
+                            vTaskDelay(pdMS_TO_TICKS(500));
+                            esp_restart();
+                        } else if (strcmp(cmd, "ap") == 0) {
+                            ESP_LOGW(TAG, "Command 'ap' received. Switching to AP Mode...");
+                            nvs_handle_t h;
+                            if (nvs_open("storage", NVS_READWRITE, &h) == ESP_OK) {
+                                nvs_set_u8(h, "force_ap", 1);
+                                nvs_commit(h);
+                                nvs_close(h);
+                            }
+                            vTaskDelay(pdMS_TO_TICKS(500));
+                            esp_restart();
+                        } else if (strcmp(cmd, "wifi") == 0) {
+                            ESP_LOGW(TAG, "Command 'wifi' received. Switching to Wi-Fi Mode...");
+                            nvs_handle_t h;
+                            if (nvs_open("storage", NVS_READWRITE, &h) == ESP_OK) {
+                                nvs_set_u8(h, "force_ap", 0);
+                                nvs_commit(h);
+                                nvs_close(h);
+                            }
+                            vTaskDelay(pdMS_TO_TICKS(500));
+                            esp_restart();
+                        }
+                        cmd_idx = 0;
+                    }
+                } else {
+                    if (cmd_idx < sizeof(cmd) - 1) {
+                        cmd[cmd_idx++] = (char)buf[i];
+                    }
+                }
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+}
+
+/* ==============================================
    WIFI EVENT HANDLER & STATE MACHINE
    ============================================== */
 static void wifi_event_handler(void* arg, esp_event_base_t event_base,
@@ -902,4 +976,7 @@ extern "C" void app_main(void) {
 
     // Start Boot Button Listener (Allows forcing configuration mode via physical button)
     xTaskCreate(boot_button_task, "button_task", 2048, NULL, 10, NULL);
+    
+    // Start standard input keyboard listener for REPL commands
+    xTaskCreate(console_read_task, "console_read_task", 4096, NULL, 5, NULL);
 }
