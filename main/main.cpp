@@ -47,7 +47,7 @@ typedef struct {
     int day;      // -1 for everyday, 0=Sun .. 6=Sat
     int hour;     // 0-23
     int minute;   // 0-59
-    int command;  // 0=Off, 1=On, 2=19C, 3=24C, 4=Server Off, 5=Server On
+    int command;  // Maps directly to execution IDs 0 through 14
 } TimerEntry;
 
 #define MAX_TIMERS 20
@@ -196,10 +196,46 @@ void execute_command(int cmd) {
             send_uart_ir(ir_19c, ir_19c_len);
             break;
         case 3:
+            strcpy(last_command_str, "Set 20C");
+            send_uart_ir(ir_20c, ir_20c_len);
+            break;
+        case 4:
+            strcpy(last_command_str, "Set 21C");
+            send_uart_ir(ir_21c, ir_21c_len);
+            break;
+        case 5:
+            strcpy(last_command_str, "Set 22C");
+            send_uart_ir(ir_22c, ir_22c_len);
+            break;
+        case 6:
+            strcpy(last_command_str, "Set 23C");
+            send_uart_ir(ir_23c, ir_23c_len);
+            break;
+        case 7:
             strcpy(last_command_str, "Set 24C");
             send_uart_ir(ir_24c, ir_24c_len);
             break;
-        case 4:
+        case 8:
+            strcpy(last_command_str, "Set 25C");
+            send_uart_ir(ir_25c, ir_25c_len);
+            break;
+        case 9:
+            strcpy(last_command_str, "Set 26C");
+            send_uart_ir(ir_26c, ir_26c_len);
+            break;
+        case 10:
+            strcpy(last_command_str, "Set 27C");
+            send_uart_ir(ir_27c, ir_27c_len);
+            break;
+        case 11:
+            strcpy(last_command_str, "Mode HOT");
+            send_uart_ir(ir_hot, ir_hot_len);
+            break;
+        case 12:
+            strcpy(last_command_str, "Mode COLD");
+            send_uart_ir(ir_cold, ir_cold_len);
+            break;
+        case 13:
             strcpy(last_command_str, "Server OFF");
             server_disabled_by_timer = true;
             if (server != NULL) {
@@ -208,7 +244,7 @@ void execute_command(int cmd) {
                 server = NULL;
             }
             break;
-        case 5:
+        case 14:
             strcpy(last_command_str, "Server ON");
             server_disabled_by_timer = false;
             if (server == NULL) {
@@ -329,9 +365,22 @@ const char HTML_UI[] = R"raw_html(
                 <button class="btn-gray" onclick="c(0)">Turn OFF</button>
                 <button class="btn-green" onclick="c(1)">Turn ON</button>
             </div>
-            <div style="display:flex; gap:10px; margin-top:5px;">
-                <button class="btn-blue" onclick="c(2)">Set 19&deg;C</button>
-                <button class="btn-blue" style="background:#f59e0b;" onclick="c(3)">Set 24&deg;C</button>
+            
+            <div style="display:grid; grid-template-columns: repeat(3, 1fr); gap:8px; margin-top:10px;">
+                <button class="btn-blue" onclick="c(2)">19&deg;C</button>
+                <button class="btn-blue" onclick="c(3)">20&deg;C</button>
+                <button class="btn-blue" onclick="c(4)">21&deg;C</button>
+                <button class="btn-blue" onclick="c(5)">22&deg;C</button>
+                <button class="btn-blue" onclick="c(6)">23&deg;C</button>
+                <button class="btn-blue" onclick="c(7)">24&deg;C</button>
+                <button class="btn-blue" onclick="c(8)">25&deg;C</button>
+                <button class="btn-blue" onclick="c(9)">26&deg;C</button>
+                <button class="btn-blue" onclick="c(10)">27&deg;C</button>
+            </div>
+            
+            <div style="display:flex; gap:10px; margin-top:8px;">
+                <button class="btn-red" onclick="c(11)">HOT Mode</button>
+                <button class="btn-blue" style="background:#0ea5e9;" onclick="c(12)">COLD Mode</button>
             </div>
             <p id="cstat" class="text-sm" style="margin-top:15px;"></p>
         </div>
@@ -344,17 +393,29 @@ const char HTML_UI[] = R"raw_html(
                 <tbody id="timersBody"></tbody>
             </table>
             
-                    <select id="t_day">
-                        <option value="-1">Everyday</option><option value="0">Sunday</option><option value="1">Monday</option>
-                        <option value="2">Tuesday</option><option value="3">Wednesday</option><option value="4">Thursday</option>
-                        <option value="5">Friday</option><option value="6">Saturday</option>
-                    </select>
-                    <input type="time" id="t_time">
-                    <select id="t_cmd">
-                        <option value="0">AC OFF</option><option value="1">AC ON</option>
-                        <option value="2">Set 19C</option><option value="3">Set 24C</option>
-                        <option value="4">Server OFF</option><option value="5">Server ON</option>
-                    </select>
+            <select id="t_day">
+                <option value="-1">Everyday</option><option value="0">Sunday</option><option value="1">Monday</option>
+                <option value="2">Tuesday</option><option value="3">Wednesday</option><option value="4">Thursday</option>
+                <option value="5">Friday</option><option value="6">Saturday</option>
+            </select>
+            <input type="time" id="t_time">
+            <select id="t_cmd">
+                <option value="0">AC OFF</option>
+                <option value="1">AC ON</option>
+                <option value="2">Set 19C</option>
+                <option value="3">Set 20C</option>
+                <option value="4">Set 21C</option>
+                <option value="5">Set 22C</option>
+                <option value="6">Set 23C</option>
+                <option value="7">Set 24C</option>
+                <option value="8">Set 25C</option>
+                <option value="9">Set 26C</option>
+                <option value="10">Set 27C</option>
+                <option value="11">Mode HOT</option>
+                <option value="12">Mode COLD</option>
+                <option value="13">Server OFF</option>
+                <option value="14">Server ON</option>
+            </select>
             
             <button class="btn-blue" onclick="addTimer()">Add Timer</button>
             <button class="btn-green" onclick="saveTimers()">Save Timers to Device</button>
@@ -382,7 +443,7 @@ const char HTML_UI[] = R"raw_html(
     <script>
         let timers = [];
         const days = {'-1':'Everyday','0':'Sun','1':'Mon','2':'Tue','3':'Wed','4':'Thu','5':'Fri','6':'Sat'};
-        const cmds = {'0':'OFF','1':'ON','2':'19C','3':'24C','4':'SRV OFF','5':'SRV ON'};
+        const cmds = {'0':'OFF','1':'ON','2':'19C','3':'20C','4':'21C','5':'22C','6':'23C','7':'24C','8':'25C','9':'26C','10':'27C','11':'HOT','12':'COLD','13':'SRV OFF','14':'SRV ON'};
         
         function c(cmd){
             document.getElementById('cstat').innerText = 'Sending...';
@@ -492,8 +553,8 @@ static esp_err_t ir_get_handler(httpd_req_t *req) {
             int cmd = atoi(param);
             ESP_LOGI(TAG, "Received IR Web Command: %d", cmd);
             
-            // Only allow IR triggers from web directly to avoid race conditions with server manipulation tasks
-            if (cmd >= 0 && cmd <= 3) {
+            // Only allow IR triggers (0 through 12) from web directly to avoid race conditions with server manipulation tasks
+            if (cmd >= 0 && cmd <= 12) {
                 execute_command(cmd);
                 httpd_resp_sendstr(req, "Command Sent");
             } else {
