@@ -19,6 +19,9 @@
 #include "driver/uart.h"
 #include "cJSON.h"
 #include "mdns.h"
+#include "lwip/sockets.h"
+#include "lwip/err.h"
+#include "lwip/sys.h"
 
 #define UART_PORT_NUM UART_NUM_1
 #define TXD_PIN (GPIO_NUM_17) // Wire to IR Module RXD
@@ -32,6 +35,7 @@ static int s_retry_num = 0;
 static bool s_ap_fallback_active = false;
 char last_command_str[32] = "None";
 bool server_disabled_by_timer = false;
+static TaskHandle_t dns_task_handle = NULL;
 
 // Timers variables
 typedef struct {
@@ -47,6 +51,7 @@ int num_timers = 0;
 SemaphoreHandle_t timer_mutex = NULL;
 
 void start_web_server();
+void start_ap_server();
 void execute_command(int cmd);
 
 /* ==============================================
@@ -67,6 +72,82 @@ const uint8_t ir_19c[] = {
 const uint8_t ir_24c[] = {
     0xA0, 0x04, 0xAC, 0x04, 0x3F, 0xD1, 0x01, 0x3F, 0x4A, 0x3B, 0xD4, 0x01, 0x3B, 0xD4, 0x01, 0x3C, 0x4A, 0x3C, 0x4A, 0x3B, 0xD4, 0x01, 0x3B, 0x4A, 0x3B, 0x4A, 0x3B, 0xD4, 0x01, 0x3B, 0x4A, 0x3A, 0x4C, 0x3B, 0xD4, 0x01, 0x3B, 0xD4, 0x01, 0x3B, 0x4A, 0x3B, 0xD4, 0x01, 0x3A, 0x4C, 0x3B, 0x4A, 0x38, 0xD8, 0x01, 0x3A, 0xD6, 0x01, 0x3A, 0xD6, 0x01, 0x3A, 0xD6, 0x01, 0x3A, 0xD6, 0x01, 0x3A, 0xD6, 0x01, 0x3B, 0xD4, 0x01, 0x3A, 0xD6, 0x01, 0x3C, 0x4A, 0x3B, 0x4A, 0x3B, 0x4A, 0x3B, 0x4A, 0x3B, 0x4A, 0x3A, 0x4C, 0x3B, 0x4A, 0x3A, 0xD6, 0x01, 0x3A, 0x4C, 0x3B, 0x4A, 0x3B, 0x4A, 0x3B, 0x4A, 0x3B, 0x4A, 0x3A, 0x4C, 0x3A, 0xD5, 0x01, 0x3A, 0x4C, 0x3B, 0xD4, 0x01, 0x3A, 0xD6, 0x01, 0x3B, 0xD4, 0x01, 0x3C, 0xD4, 0x01, 0x3C, 0xD4, 0x01, 0x3A, 0xD6, 0x01, 0x3B, 0x93, 0x05, 0xA0, 0x04, 0xAF, 0x04, 0x3A, 0xD6, 0x01, 0x3B, 0x4A, 0x3A, 0xD6, 0x01, 0x3B, 0xD4, 0x01, 0x3A, 0x4C, 0x3A, 0x4C, 0x3C, 0xD4, 0x01, 0x39, 0x4C, 0x3C, 0x4A, 0x3B, 0xD4, 0x01, 0x3B, 0x4A, 0x38, 0x4E, 0x3A, 0xD6, 0x01, 0x3B, 0xD4, 0x01, 0x38, 0x4E, 0x3B, 0xD4, 0x01, 0x3B, 0x4A, 0x3A, 0x4C, 0x3C, 0xD4, 0x01, 0x3A, 0xD6, 0x01, 0x3A, 0xD6, 0x01, 0x38, 0xD7, 0x01, 0x3C, 0xD4, 0x01, 0x3B, 0xD4, 0x01, 0x3C, 0xD4, 0x01, 0x3B, 0xD4, 0x01, 0x3B, 0x4A, 0x3A, 0x4C, 0x3B, 0x4A, 0x3C, 0x4A, 0x3A, 0x4C, 0x3C, 0x4A, 0x3B, 0x4A, 0x3B, 0xD4, 0x01, 0x3B, 0x4A, 0x3A, 0x4C, 0x3C, 0x4A, 0x3A, 0x4C, 0x3B, 0x4A, 0x3A, 0x4C, 0x3B, 0xD4, 0x01, 0x3A, 0x4C, 0x3A, 0xD6, 0x01, 0x39, 0xD6, 0x01, 0x3C, 0xD4, 0x01, 0x3A, 0xD6, 0x01, 0x3B, 0xD4, 0x01, 0x3B, 0xD4, 0x01, 0x3B
 };
+
+/* ==============================================
+   DNS CAPTIVE PORTAL TASK
+   ============================================== */
+void dns_server_task(void *pvParameters) {
+    char rx_buffer[128];
+    struct sockaddr_in dest_addr;
+    dest_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    dest_addr.sin_family = AF_INET;
+    dest_addr.sin_port = htons(53);
+    
+    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
+    if (sock < 0) {
+        ESP_LOGE("DNS", "Unable to create socket: errno %d", errno);
+        vTaskDelete(NULL);
+        return;
+    }
+    
+    int err = bind(sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+    if (err < 0) {
+        ESP_LOGE("DNS", "Socket unable to bind: errno %d", errno);
+        close(sock);
+        vTaskDelete(NULL);
+        return;
+    }
+    
+    ESP_LOGI("DNS", "DNS Server listening on port 53");
+
+    while (1) {
+        struct sockaddr_storage source_addr;
+        socklen_t socklen = sizeof(source_addr);
+        int len = recvfrom(sock, rx_buffer, sizeof(rx_buffer) - 1, 0, (struct sockaddr *)&source_addr, &socklen);
+        
+        if (len < 0) {
+            ESP_LOGE("DNS", "recvfrom failed: errno %d", errno);
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+
+        if (len > 12) {
+            // Very basic DNS response to forward all traffic to 192.168.4.1 (The AP IP)
+            rx_buffer[2] = 0x81; // Flags: Standard query response, No error
+            rx_buffer[3] = 0x80;
+            rx_buffer[6] = rx_buffer[4]; // Answer RRs = Question RRs
+            rx_buffer[7] = rx_buffer[5];
+            rx_buffer[8] = 0; rx_buffer[9] = 0; // Authority RRs
+            rx_buffer[10] = 0; rx_buffer[11] = 0; // Additional RRs
+            
+            int pos = len;
+            // Answer header (Pointer to question)
+            rx_buffer[pos++] = 0xC0;
+            rx_buffer[pos++] = 0x0C;
+            // Type A
+            rx_buffer[pos++] = 0x00;
+            rx_buffer[pos++] = 0x01;
+            // Class IN
+            rx_buffer[pos++] = 0x00;
+            rx_buffer[pos++] = 0x01;
+            // TTL (60)
+            rx_buffer[pos++] = 0x00;
+            rx_buffer[pos++] = 0x00;
+            rx_buffer[pos++] = 0x00;
+            rx_buffer[pos++] = 0x3C;
+            // Data length (4)
+            rx_buffer[pos++] = 0x00;
+            rx_buffer[pos++] = 0x04;
+            // IP Address (192.168.4.1)
+            rx_buffer[pos++] = 192;
+            rx_buffer[pos++] = 168;
+            rx_buffer[pos++] = 4;
+            rx_buffer[pos++] = 1;
+            
+            sendto(sock, rx_buffer, pos, 0, (struct sockaddr *)&source_addr, sizeof(source_addr));
+        }
+    }
+}
 
 
 /* ==============================================
@@ -222,60 +303,198 @@ void initialize_sntp(void) {
     tzset();
 }
 
+/* ==============================================
+   HTML UI PAYLOAD
+   ============================================== */
+const char HTML_UI[] = R"raw_html(
+<!DOCTYPE html><html><head><meta charset="utf-8"><title>ESP32 A/C Controller</title><meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+    :root { --primary: #0ea5e9; --bg: #0f172a; --card: #1e293b; --text: #f1f5f9; }
+    body { font-family: -apple-system, sans-serif; background: var(--bg); color: var(--text); padding: 15px; display: flex; flex-direction: column; align-items: center; margin:0; }
+    .container { width: 100%; max-width: 500px; }
+    .card { background: var(--card); padding: 25px; border-radius: 20px; border: 1px solid #334155; text-align: center; margin-bottom: 20px; }
+    h2 { color: var(--primary); margin-top: 0; }
+    input, select { width: 100%; padding: 12px; margin: 8px 0 20px; border-radius: 10px; border: 1px solid #475569; background: #0f172a; color: white; box-sizing: border-box; }
+    button { width: 100%; padding: 15px; border: none; border-radius: 12px; font-weight: bold; cursor: pointer; color: white; margin-top:10px; transition: transform 0.1s; }
+    button:active { transform: scale(0.96); opacity: 0.9; }
+    .btn-green { background: #10b981; }
+    .btn-red { background: #ef4444; }
+    .btn-blue { background: #3b82f6; }
+    .btn-gray { background: #475569; }
+    .status-bar { padding: 12px; border-radius: 10px; font-weight: bold; text-align: center; font-size: 0.85rem; border: 1px solid; text-transform: uppercase; background: #172554; color: #93c5fd; border-color: #3b82f6; margin-bottom:15px; }
+    .text-sm { font-size: 0.85rem; color: #94a3b8; margin-bottom:10px; }
+    table { border-collapse: collapse; width: 100%; margin-bottom: 20px; font-size: 0.9rem; }
+    th, td { border: 1px solid #475569; padding: 10px; text-align: center; }
+    th { background: #0f172a; color: #0ea5e9; }
+    .timer-del { background: #ef4444; padding: 5px; margin: 0; border-radius: 6px; }
+</style>
+</head>
+<body>
+    <div class="container">
+        <div class="status-bar">A/C CONTROLLER DASHBOARD</div>
+        
+        <!-- Controls Card -->
+        <div class="card">
+            <h2>Control A/C</h2>
+            <div class="text-sm"><b>Time:</b> <span id="curtime">Loading...</span></div>
+            <div class="text-sm"><b>Last Command:</b> <span id="lastcmd" style="color:#3b82f6;">None</span></div>
+            
+            <div style="display:flex; gap:10px;">
+                <button class="btn-gray" onclick="c(0)">Turn OFF</button>
+                <button class="btn-green" onclick="c(1)">Turn ON</button>
+            </div>
+            <div style="display:flex; gap:10px; margin-top:5px;">
+                <button class="btn-blue" onclick="c(2)">Set 19&deg;C</button>
+                <button class="btn-blue" style="background:#f59e0b;" onclick="c(3)">Set 24&deg;C</button>
+            </div>
+            <p id="cstat" class="text-sm" style="margin-top:15px;"></p>
+        </div>
+
+        <!-- Timers Card -->
+        <div class="card">
+            <h2>Timers</h2>
+            <table id="timersTbl">
+                <thead><tr><th>Day</th><th>Time</th><th>Action</th><th></th></tr></thead>
+                <tbody id="timersBody"></tbody>
+            </table>
+            
+            <select id="t_day">
+                <option value="-1">Everyday</option><option value="0">Sunday</option><option value="1">Monday</option>
+                <option value="2">Tuesday</option><option value="3">Wednesday</option><option value="4">Thursday</option>
+                <option value="5">Friday</option><option value="6">Saturday</option>
+            </select>
+            <input type="time" id="t_time">
+            <select id="t_cmd">
+                <option value="0">AC OFF</option><option value="1">AC ON</option>
+                <option value="2">Set 19C</option><option value="3">Set 24C</option>
+                <option value="4">Server OFF</option><option value="5">Server ON</option>
+            </select>
+            
+            <button class="btn-blue" onclick="addTimer()">Add Timer</button>
+            <button class="btn-green" onclick="saveTimers()">Save Timers to Device</button>
+            <p id="tstat" class="text-sm" style="margin-top:10px;"></p>
+        </div>
+
+        <!-- Wi-Fi Setup Card -->
+        <div class="card">
+            <h2>Wi-Fi Settings</h2>
+            <div id="status" class="text-sm">Ready to Scan</div>
+            <button class="btn-gray" onclick="scan()">Scan Networks</button>
+            
+            <select id="ssid" style="margin-top:15px;"><option value="">-- Select --</option></select>
+            <input type="password" id="pass" placeholder="Password">
+            
+            <button class="btn-green" onclick="save()">Save and Connect</button>
+            
+            <hr style="border-color:#334155; margin: 25px 0;">
+            <div class="text-sm">Quick Boot Mode Switch</div>
+            <button style="background:#f59e0b;" onclick="forceAP()">Force AP Mode</button>
+            <button style="background:#10b981;" onclick="forceWiFi()">Use Saved Wi-Fi</button>
+        </div>
+    </div>
+
+    <script>
+        let timers = [];
+        const days = {'-1':'Everyday','0':'Sun','1':'Mon','2':'Tue','3':'Wed','4':'Thu','5':'Fri','6':'Sat'};
+        const cmds = {'0':'OFF','1':'ON','2':'19C','3':'24C','4':'SRV OFF','5':'SRV ON'};
+        
+        function c(cmd){
+            document.getElementById('cstat').innerText = 'Sending...';
+            fetch('/ir?cmd='+cmd).then(r=>r.text()).then(t=>{
+                document.getElementById('cstat').innerText = 'Status: ' + t;
+                setTimeout(loadStatus, 600);
+            });
+        }
+        
+        function scan(){
+            document.getElementById('status').innerText = 'Scanning...';
+            fetch('/scan').then(r=>r.json()).then(d=>{
+                let s = document.getElementById('ssid');
+                s.innerHTML = '<option value="">-- Select --</option>';
+                d.forEach(n=>{ s.innerHTML += '<option value="'+n+'">'+n+'</option>'; });
+                document.getElementById('status').innerText = 'Found ' + d.length + ' networks';
+            }).catch(() => document.getElementById('status').innerText = 'Scan Error');
+        }
+        
+        function save(){
+            let s = document.getElementById('ssid').value, p = document.getElementById('pass').value;
+            if(!s) return alert('Select SSID');
+            fetch('/save', { method:'POST', body:JSON.stringify({ssid:s, pass:p}) }).then(()=>{
+                alert('Credentials saved! Rebooting...');
+            });
+        }
+        
+        function forceAP(){
+            if(confirm("Switch to AP Mode and reboot?")) fetch('/switch_to_ap', { method: 'POST' }).then(() => alert('Rebooting...'));
+        }
+        
+        function forceWiFi(){
+            if(confirm("Switch to Wi-Fi Mode and reboot?")) fetch('/switch_to_wifi', { method: 'POST' }).then(() => alert('Rebooting...'));
+        }
+
+        function loadStatus(){
+            fetch('/status').then(r=>r.json()).then(d=>{
+                document.getElementById('curtime').innerText = d.time;
+                document.getElementById('lastcmd').innerText = d.last_cmd;
+                timers = d.timers || [];
+                renderTimers();
+            });
+        }
+
+        function renderTimers(){
+            let b = document.getElementById('timersBody');
+            b.innerHTML = '';
+            timers.forEach((t, i)=>{
+                let tr = document.createElement('tr');
+                tr.innerHTML = `<td>${days[t.d]}</td><td>${t.h.toString().padStart(2,'0')}:${t.m.toString().padStart(2,'0')}</td><td>${cmds[t.c]}</td><td><button class="timer-del" onclick="delTimer(${i})">X</button></td>`;
+                b.appendChild(tr);
+            });
+        }
+
+        function addTimer(){
+            let d = parseInt(document.getElementById('t_day').value);
+            let timeStr = document.getElementById('t_time').value;
+            let c = parseInt(document.getElementById('t_cmd').value);
+            if(!timeStr) return alert('Select time');
+            let parts = timeStr.split(':');
+            timers.push({ d:d, h:parseInt(parts[0]), m:parseInt(parts[1]), c:c });
+            renderTimers();
+        }
+
+        function delTimer(i){ timers.splice(i, 1); renderTimers(); }
+
+        function saveTimers(){
+            document.getElementById('tstat').innerText = 'Saving...';
+            fetch('/timers', { method:'POST', body:JSON.stringify(timers) }).then(()=>{
+                document.getElementById('tstat').innerText = 'Saved!';
+                setTimeout(() => document.getElementById('tstat').innerText='', 2000);
+            });
+        }
+
+        setInterval(loadStatus, 10000);
+        window.onload = loadStatus;
+    </script>
+</body></html>
+)raw_html";
 
 /* ==============================================
    HTTP SERVER (CONTROL & PROVISIONING)
    ============================================== */
 void delayed_reboot_task(void *pvParameter) {
-    vTaskDelay(pdMS_TO_TICKS(2000));
+    vTaskDelay(pdMS_TO_TICKS(1500));
     esp_restart();
 }
 
 static esp_err_t index_get_handler(httpd_req_t *req) {
-    char *html = (char *)malloc(8192);
-    if (!html) {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
-        return ESP_FAIL;
-    }
-    
-    snprintf(html, 8192,
-        "<!DOCTYPE html><html><head><title>ESP32 A/C Controller</title>"
-        "<meta name='viewport' content='width=device-width, initial-scale=1'>"
-        "<style>body{font-family:sans-serif;margin:20px;}button{padding:10px;margin:5px;font-size:16px;}"
-        "table{border-collapse:collapse;width:100%%;max-width:500px;}th,td{border:1px solid #ddd;padding:8px;text-align:left;}</style>"
-        "</head><body><h2>Control A/C</h2>"
-        "<p><b>Last Command:</b> <span id='lastcmd' style='color:#007BFF;'>%s</span></p>"
-        "<p><b>Current Time:</b> <span id='curtime'>Loading...</span></p>"
-        "<button onclick='c(0)'>Turn OFF</button> <button onclick='c(1)'>Turn ON</button><br>"
-        "<button onclick='c(2)'>Set 19&deg;C</button> <button onclick='c(3)'>Set 24&deg;C</button>"
-        "<p id='cstat'></p><hr>"
-        "<h2>Timers</h2><table id='timersTbl'><thead><tr><th>Day</th><th>Time</th><th>Command</th><th>Action</th></tr></thead>"
-        "<tbody id='timersBody'></tbody></table><br>"
-        "<select id='t_day'><option value='-1'>Everyday</option><option value='0'>Sunday</option><option value='1'>Monday</option>"
-        "<option value='2'>Tuesday</option><option value='3'>Wednesday</option><option value='4'>Thursday</option><option value='5'>Friday</option><option value='6'>Saturday</option></select>"
-        "<input type='time' id='t_time'>"
-        "<select id='t_cmd'><option value='0'>AC OFF</option><option value='1'>AC ON</option><option value='2'>Set 19C</option><option value='3'>Set 24C</option><option value='4'>Server OFF</option><option value='5'>Server ON</option></select>"
-        "<button onclick='addTimer()'>Add Timer</button><br><br><button onclick='saveTimers()'>Save Timers</button><p id='tstat'></p><hr>"
-        "<h2>Wi-Fi Setup</h2><button onclick='scan()'>Scan Networks</button><p id='status'></p>"
-        "<div style='margin-bottom:10px;'><label>SSID:</label><br><select id='ssid'></select></div>"
-        "<div style='margin-bottom:10px;'><label>Password:</label><br><input type='password' id='pass'>"
-        "<input type='checkbox' onclick=\"let p=document.getElementById('pass');p.type=(p.type==='password')?'text':'password';\"> Show</div>"
-        "<button onclick='save()'>Save & Reboot</button>"
-        "<script>let timers=[];const days={'-1':'Everyday','0':'Sunday','1':'Monday','2':'Tuesday','3':'Wednesday','4':'Thursday','5':'Friday','6':'Saturday'};"
-        "const cmds={'0':'AC OFF','1':'AC ON','2':'Set 19C','3':'Set 24C','4':'Server OFF','5':'Server ON'};"
-        "function c(cmd){document.getElementById('cstat').innerText='Sending...';fetch('/ir?cmd='+cmd).then(r=>r.text()).then(t=>{document.getElementById('cstat').innerText='Status: '+t;setTimeout(()=>location.reload(),600);});}"
-        "function scan(){document.getElementById('status').innerText='Scanning...';fetch('/scan').then(r=>r.json()).then(d=>{let s=document.getElementById('ssid');s.innerHTML='';d.forEach(n=>{s.innerHTML+='<option value=\"'+n+'\">'+n+'</option>';});document.getElementById('status').innerText='Found '+d.length+' networks';});}"
-        "function save(){let s=document.getElementById('ssid').value,p=document.getElementById('pass').value;fetch('/save',{method:'POST',body:JSON.stringify({ssid:s,pass:p})}).then(()=>{alert('Credentials saved! Rebooting...');});}"
-        "function loadStatus(){fetch('/status').then(r=>r.json()).then(d=>{document.getElementById('curtime').innerText=d.time;timers=d.timers||[];renderTimers();});}"
-        "function renderTimers(){let b=document.getElementById('timersBody');b.innerHTML='';timers.forEach((t,i)=>{let tr=document.createElement('tr');tr.innerHTML=`<td>${days[t.d]}</td><td>${t.h.toString().padStart(2,'0')}:${t.m.toString().padStart(2,'0')}</td><td>${cmds[t.c]}</td><td><button onclick='delTimer(${i})'>X</button></td>`;b.appendChild(tr);});}"
-        "function addTimer(){let d=parseInt(document.getElementById('t_day').value),timeStr=document.getElementById('t_time').value,c=parseInt(document.getElementById('t_cmd').value);if(!timeStr)return alert('Select time');let parts=timeStr.split(':');timers.push({d:d,h:parseInt(parts[0]),m:parseInt(parts[1]),c:c});renderTimers();}"
-        "function delTimer(i){timers.splice(i,1);renderTimers();}"
-        "function saveTimers(){document.getElementById('tstat').innerText='Saving...';fetch('/timers',{method:'POST',body:JSON.stringify(timers)}).then(()=>{document.getElementById('tstat').innerText='Saved!';});}"
-        "setInterval(()=>{fetch('/status').then(r=>r.json()).then(d=>document.getElementById('curtime').innerText=d.time);},10000);"
-        "window.onload=loadStatus;</script></body></html>", last_command_str);
-    
-    httpd_resp_send(req, html, HTTPD_RESP_USE_STRLEN);
-    free(html);
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_send(req, HTML_UI, HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+}
+
+static esp_err_t captive_portal_redirect(httpd_req_t *req) {
+    httpd_resp_set_status(req, "302 Found");
+    httpd_resp_set_hdr(req, "Location", "http://192.168.4.1/");
+    httpd_resp_send(req, NULL, 0);
     return ESP_OK;
 }
 
@@ -317,6 +536,7 @@ static esp_err_t status_get_handler(httpd_req_t *req) {
     
     cJSON *root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "time", time_str);
+    cJSON_AddStringToObject(root, "last_cmd", last_command_str);
     
     cJSON *timers_arr = cJSON_CreateArray();
     if (xSemaphoreTake(timer_mutex, portMAX_DELAY)) {
@@ -428,6 +648,7 @@ static esp_err_t save_post_handler(httpd_req_t *req) {
             nvs_open("storage", NVS_READWRITE, &my_handle);
             nvs_set_str(my_handle, "wifi_ssid", s->valuestring);
             nvs_set_str(my_handle, "wifi_pass", p->valuestring);
+            nvs_set_u8(my_handle, "force_ap", 0); // Auto revert to STA if new settings saved
             nvs_commit(my_handle);
             nvs_close(my_handle);
             ESP_LOGI(TAG, "Saved SSID: %s", s->valuestring);
@@ -439,9 +660,34 @@ static esp_err_t save_post_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+static esp_err_t switch_ap_post_handler(httpd_req_t *req) {
+    nvs_handle_t my_handle;
+    nvs_open("storage", NVS_READWRITE, &my_handle);
+    nvs_set_u8(my_handle, "force_ap", 1);
+    nvs_commit(my_handle);
+    nvs_close(my_handle);
+    httpd_resp_sendstr(req, "OK");
+    xTaskCreate(delayed_reboot_task, "reboot_task", 2048, NULL, 5, NULL);
+    return ESP_OK;
+}
+
+static esp_err_t switch_wifi_post_handler(httpd_req_t *req) {
+    nvs_handle_t my_handle;
+    nvs_open("storage", NVS_READWRITE, &my_handle);
+    nvs_set_u8(my_handle, "force_ap", 0);
+    nvs_commit(my_handle);
+    nvs_close(my_handle);
+    httpd_resp_sendstr(req, "OK");
+    xTaskCreate(delayed_reboot_task, "reboot_task", 2048, NULL, 5, NULL);
+    return ESP_OK;
+}
+
 void start_web_server() {
     if (server == NULL) {
         httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+        // Allow wildcard routing for captive portal
+        config.uri_match_fn = httpd_uri_match_wildcard;
+        
         if (httpd_start(&server, &config) == ESP_OK) {
             httpd_uri_t uri_index  = { .uri = "/",       .method = HTTP_GET,  .handler = index_get_handler,  .user_ctx = NULL };
             httpd_uri_t uri_scan   = { .uri = "/scan",   .method = HTTP_GET,  .handler = scan_get_handler,   .user_ctx = NULL };
@@ -449,6 +695,13 @@ void start_web_server() {
             httpd_uri_t uri_ir     = { .uri = "/ir",     .method = HTTP_GET,  .handler = ir_get_handler,     .user_ctx = NULL };
             httpd_uri_t uri_status = { .uri = "/status", .method = HTTP_GET,  .handler = status_get_handler, .user_ctx = NULL };
             httpd_uri_t uri_timers = { .uri = "/timers", .method = HTTP_POST, .handler = timers_post_handler,.user_ctx = NULL };
+            httpd_uri_t uri_switch_ap   = { .uri = "/switch_to_ap",   .method = HTTP_POST, .handler = switch_ap_post_handler,   .user_ctx = NULL };
+            httpd_uri_t uri_switch_wifi = { .uri = "/switch_to_wifi", .method = HTTP_POST, .handler = switch_wifi_post_handler, .user_ctx = NULL };
+            
+            // Common captive portal endpoints
+            httpd_uri_t uri_cp1 = { .uri = "/generate_204", .method = HTTP_GET, .handler = captive_portal_redirect, .user_ctx = NULL };
+            httpd_uri_t uri_cp2 = { .uri = "/hotspot-detect.html", .method = HTTP_GET, .handler = captive_portal_redirect, .user_ctx = NULL };
+            httpd_uri_t uri_cp3 = { .uri = "/ncsi.txt", .method = HTTP_GET, .handler = captive_portal_redirect, .user_ctx = NULL };
             
             httpd_register_uri_handler(server, &uri_index);
             httpd_register_uri_handler(server, &uri_scan);
@@ -456,6 +709,11 @@ void start_web_server() {
             httpd_register_uri_handler(server, &uri_ir);
             httpd_register_uri_handler(server, &uri_status);
             httpd_register_uri_handler(server, &uri_timers);
+            httpd_register_uri_handler(server, &uri_switch_ap);
+            httpd_register_uri_handler(server, &uri_switch_wifi);
+            httpd_register_uri_handler(server, &uri_cp1);
+            httpd_register_uri_handler(server, &uri_cp2);
+            httpd_register_uri_handler(server, &uri_cp3);
             
             ESP_LOGI(TAG, "Web Server started successfully on port %d", config.server_port);
         }
@@ -466,9 +724,9 @@ void start_ap_server() {
     ESP_LOGI(TAG, "Configuring and Launching SoftAP Portal...");
     
     wifi_config_t wifi_config = {};
-    strcpy((char*)wifi_config.ap.ssid, "ESP32_Config");
+    strcpy((char*)wifi_config.ap.ssid, "ESP32_AC_Config");
     strcpy((char*)wifi_config.ap.password, "12345678");
-    wifi_config.ap.ssid_len = strlen("ESP32_Config");
+    wifi_config.ap.ssid_len = strlen("ESP32_AC_Config");
     wifi_config.ap.channel = 1;
     wifi_config.ap.max_connection = 4;
     wifi_config.ap.authmode = WIFI_AUTH_WPA2_PSK;
@@ -476,11 +734,26 @@ void start_ap_server() {
     // Safely stop Wi-Fi driver first to apply mode modifications cleanly 
     esp_wifi_stop();
 
+    esp_netif_t *ap_netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+    if (ap_netif) {
+        esp_netif_ip_info_t ip_info;
+        IP4_ADDR(&ip_info.ip, 192, 168, 4, 1);
+        IP4_ADDR(&ip_info.gw, 192, 168, 4, 1);
+        IP4_ADDR(&ip_info.netmask, 255, 255, 255, 0);
+        esp_netif_dhcps_stop(ap_netif);
+        esp_netif_set_ip_info(ap_netif, &ip_info);
+        esp_netif_dhcps_start(ap_netif);
+    }
+
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    ESP_LOGI(TAG, "SoftAP broadcast started! SSID: ESP32_Config, WPA2 Password: 12345678");
+    ESP_LOGI(TAG, "SoftAP broadcast started! SSID: ESP32_AC_Config, WPA2 Password: 12345678, IP: 192.168.4.1");
+    
+    if (dns_task_handle == NULL) {
+        xTaskCreate(dns_server_task, "dns_task", 4096, NULL, 5, &dns_task_handle);
+    }
     start_web_server();
 }
 
@@ -594,10 +867,15 @@ extern "C" void app_main(void) {
 
     nvs_handle_t my_handle;
     bool has_credentials = false;
+    uint8_t force_ap_u8 = 0;
+
     if (nvs_open("storage", NVS_READONLY, &my_handle) == ESP_OK) {
+        nvs_get_u8(my_handle, "force_ap", &force_ap_u8);
         char ssid[32]; char pass[64];
         size_t s_len = sizeof(ssid); size_t p_len = sizeof(pass);
-        if (nvs_get_str(my_handle, "wifi_ssid", ssid, &s_len) == ESP_OK &&
+        
+        if (force_ap_u8 == 0 &&
+            nvs_get_str(my_handle, "wifi_ssid", ssid, &s_len) == ESP_OK &&
             nvs_get_str(my_handle, "wifi_pass", pass, &p_len) == ESP_OK) {
             
             ESP_LOGI(TAG, "Saved network credentials found. Initializing connection sequence to: %s", ssid);
@@ -613,13 +891,15 @@ extern "C" void app_main(void) {
         nvs_close(my_handle);
     }
 
-    // Fallback directly to AP mode if no settings are configured
-    if (!has_credentials) {
-        ESP_LOGW(TAG, "No Wi-Fi credentials found in memory. Launching AP Config Portal...");
+    // Fallback directly to AP mode if no settings are configured or if manually forced
+    if (!has_credentials || force_ap_u8 == 1) {
+        if(force_ap_u8 == 1) ESP_LOGW(TAG, "AP Mode forced by User Preference.");
+        else ESP_LOGW(TAG, "No Wi-Fi credentials found in memory. Launching AP Config Portal...");
+        
         s_ap_fallback_active = true;
         start_ap_server();
     }
 
-    // Start Boot Button Listener (Allows forcing configuration mode)
+    // Start Boot Button Listener (Allows forcing configuration mode via physical button)
     xTaskCreate(boot_button_task, "button_task", 2048, NULL, 10, NULL);
 }
