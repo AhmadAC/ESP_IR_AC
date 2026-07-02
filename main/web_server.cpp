@@ -334,6 +334,18 @@ const char HTML_UI[] = R"raw_html(
 </body></html>
 )raw_html";
 
+// Forward declarations of HTTP Handlers to resolve the compilation order error
+static esp_err_t index_get_handler(httpd_req_t *req);
+static esp_err_t captive_portal_redirect(httpd_req_t *req);
+static esp_err_t ir_get_handler(httpd_req_t *req);
+static esp_err_t auto_post_handler(httpd_req_t *req);
+static esp_err_t status_get_handler(httpd_req_t *req);
+static esp_err_t timers_post_handler(httpd_req_t *req);
+static esp_err_t scan_get_handler(httpd_req_t *req);
+static esp_err_t save_post_handler(httpd_req_t *req);
+static esp_err_t switch_ap_post_handler(httpd_req_t *req);
+static esp_err_t switch_wifi_post_handler(httpd_req_t *req);
+
 static const httpd_uri_t uri_index  = { .uri = "/",       .method = HTTP_GET,  .handler = index_get_handler,  .user_ctx = NULL };
 static const httpd_uri_t uri_scan   = { .uri = "/scan",   .method = HTTP_GET,  .handler = scan_get_handler,   .user_ctx = NULL };
 static const httpd_uri_t uri_save   = { .uri = "/save",   .method = HTTP_POST, .handler = save_post_handler,  .user_ctx = NULL };
