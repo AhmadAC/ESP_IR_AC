@@ -10,12 +10,14 @@
 #include "esp_sntp.h"
 #include "esp_mac.h"
 #include "nvs.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include <string.h>
 
 static const char *TAG = "WIFI_MGR";
 static int s_retry_num = 0;
 bool s_ap_fallback_active = false;
-bool s_wifi_is_started = false; // State tracker to prevent uninitialized driver crashes
+bool s_wifi_is_started = false; 
 static TaskHandle_t dns_task_handle = NULL;
 
 void dns_server_task(void *pvParameters) {
@@ -27,11 +29,13 @@ void dns_server_task(void *pvParameters) {
     
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) {
+        dns_task_handle = NULL;
         vTaskDelete(NULL);
         return;
     }
     if (bind(sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr)) < 0) {
         close(sock);
+        dns_task_handle = NULL;
         vTaskDelete(NULL);
         return;
     }
@@ -85,6 +89,11 @@ void initialize_sntp(void) {
     tzset();
 }
 
+static void ap_fallback_task(void *pvParameter) {
+    start_ap_server();
+    vTaskDelete(NULL);
+}
+
 static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
@@ -98,7 +107,9 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t e
         } else {
             ESP_LOGW(TAG, "Connection attempts exhausted. Rolling back to AP Config Portal...");
             s_ap_fallback_active = true;
-            start_ap_server();
+            // DANGER: Calling esp_wifi_stop() inside the event loop dispatcher causes a kernel deadlock.
+            // Spawning a micro-task isolates the call securely.
+            xTaskCreate(ap_fallback_task, "ap_fallback", 4096, NULL, 5, NULL);
         }
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_STACONNECTED) {
         wifi_event_ap_staconnected_t* event = (wifi_event_ap_staconnected_t*) event_data;
@@ -170,7 +181,6 @@ void wifi_init_and_connect() {
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
-    // Passing NULL explicitly fixes stack deletion bugs tied to previous event handler parameters
     ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, NULL));
     ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, NULL));
 
