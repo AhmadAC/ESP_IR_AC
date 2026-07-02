@@ -60,15 +60,19 @@ SemaphoreHandle_t timer_mutex = NULL;
 // Automation & Sensor Variables
 float current_temp = 0.0;
 float current_hum = 0.0;
-bool auto_condition_met_last = false;
 static portMUX_TYPE dht_mux = portMUX_INITIALIZER_UNLOCKED;
 
-struct {
-    int enabled;
+#define MAX_AUTOS 10
+typedef struct {
     float threshold;
     int condition; // 0 = Below or equal, 1 = Above or equal
     int command;
-} auto_config = {0, 25.0, 1, 1}; // Default state
+} AutoEntry;
+
+AutoEntry auto_rules[MAX_AUTOS];
+bool auto_triggered[MAX_AUTOS]; // Keeps track if the rule has already executed to prevent spamming
+int num_autos = 0;
+SemaphoreHandle_t auto_mutex = NULL;
 
 void start_web_server();
 void start_ap_server();
@@ -80,30 +84,21 @@ void execute_command(int cmd);
 void load_auto_config() {
     nvs_handle_t my_handle;
     if(nvs_open("storage", NVS_READONLY, &my_handle) == ESP_OK) {
-        nvs_get_i32(my_handle, "auto_en", (int32_t*)&auto_config.enabled);
-        uint32_t t_thresh;
-        if(nvs_get_u32(my_handle, "auto_thr", &t_thresh) == ESP_OK) {
-            float *f = (float*)&t_thresh;
-            auto_config.threshold = *f;
+        uint32_t count = 0;
+        if(nvs_get_u32(my_handle, "num_autos", &count) == ESP_OK) {
+            if (xSemaphoreTake(auto_mutex, portMAX_DELAY)) {
+                num_autos = count;
+                if(num_autos > MAX_AUTOS) num_autos = MAX_AUTOS;
+                size_t required_size = sizeof(AutoEntry) * num_autos;
+                if(required_size > 0) {
+                    nvs_get_blob(my_handle, "auto_rules", auto_rules, &required_size);
+                }
+                memset(auto_triggered, 0, sizeof(auto_triggered)); // Reset trigger states
+                xSemaphoreGive(auto_mutex);
+            }
         }
-        nvs_get_i32(my_handle, "auto_con", (int32_t*)&auto_config.condition);
-        nvs_get_i32(my_handle, "auto_cmd", (int32_t*)&auto_config.command);
         nvs_close(my_handle);
-        ESP_LOGI(TAG, "Loaded Automation Config: EN=%d, THR=%.1f, CON=%d, CMD=%d", 
-                 auto_config.enabled, auto_config.threshold, auto_config.condition, auto_config.command);
-    }
-}
-
-void save_auto_config() {
-    nvs_handle_t my_handle;
-    if(nvs_open("storage", NVS_READWRITE, &my_handle) == ESP_OK) {
-        nvs_set_i32(my_handle, "auto_en", auto_config.enabled);
-        uint32_t *t_thresh = (uint32_t*)&auto_config.threshold;
-        nvs_set_u32(my_handle, "auto_thr", *t_thresh);
-        nvs_set_i32(my_handle, "auto_con", auto_config.condition);
-        nvs_set_i32(my_handle, "auto_cmd", auto_config.command);
-        nvs_commit(my_handle);
-        nvs_close(my_handle);
+        ESP_LOGI(TAG, "Loaded %d automation rules from NVS", num_autos);
     }
 }
 
@@ -163,18 +158,23 @@ void dht_task(void *pvParameter) {
             current_temp = temp;
             current_hum = hum;
             
-            // Handle Automation Trigger
-            if (auto_config.enabled) {
-                bool condition_met = false;
-                if (auto_config.condition == 1 && current_temp >= auto_config.threshold) condition_met = true;
-                if (auto_config.condition == 0 && current_temp <= auto_config.threshold) condition_met = true;
-                
-                if (condition_met && !auto_condition_met_last) {
-                    ESP_LOGI(TAG, "Automation Triggered! Temp: %.1f, Thresh: %.1f, Executing Cmd: %d", 
-                             current_temp, auto_config.threshold, auto_config.command);
-                    execute_command(auto_config.command);
+            // Handle Automation Triggers
+            if (xSemaphoreTake(auto_mutex, portMAX_DELAY)) {
+                for (int i = 0; i < num_autos; i++) {
+                    bool condition_met = false;
+                    
+                    if (auto_rules[i].condition == 1 && current_temp >= auto_rules[i].threshold) condition_met = true;
+                    if (auto_rules[i].condition == 0 && current_temp <= auto_rules[i].threshold) condition_met = true;
+                    
+                    if (condition_met && !auto_triggered[i]) {
+                        ESP_LOGI(TAG, "Automation %d Triggered! Temp: %.1f, Thresh: %.1f, Cmd: %d", 
+                                 i, current_temp, auto_rules[i].threshold, auto_rules[i].command);
+                        execute_command(auto_rules[i].command);
+                    }
+                    
+                    auto_triggered[i] = condition_met; // Record state so it doesn't loop forever
                 }
-                auto_condition_met_last = condition_met; // Record state so it doesn't loop forever
+                xSemaphoreGive(auto_mutex);
             }
         }
     }
@@ -450,14 +450,15 @@ const char HTML_UI[] = R"raw_html(
     .btn-red { background: #ef4444; }
     .btn-blue { background: #3b82f6; }
     .btn-gray { background: #475569; }
+    .btn-add { background: #0ea5e9; padding: 10px; border-radius: 8px; width: auto; font-size: 0.9rem; margin-top: 5px; }
     .status-bar { padding: 12px; border-radius: 10px; font-weight: bold; text-align: center; font-size: 0.85rem; border: 1px solid; text-transform: uppercase; background: #172554; color: #93c5fd; border-color: #3b82f6; margin-bottom:15px; }
     .text-sm { font-size: 0.85rem; color: #94a3b8; margin-bottom:10px; }
     .sensor-val { font-size: 1.5rem; color: #38bdf8; font-weight: bold; }
     table { border-collapse: collapse; width: 100%; margin-bottom: 20px; font-size: 0.9rem; }
     th, td { border: 1px solid #475569; padding: 10px; text-align: center; }
     th { background: #0f172a; color: #0ea5e9; }
-    .timer-del { background: #ef4444; padding: 5px; margin: 0; border-radius: 6px; }
-    .flex-row { display: flex; gap: 10px; align-items: center; }
+    .del-btn { background: #ef4444; padding: 5px; margin: 0; border-radius: 6px; }
+    .flex-row { display: flex; gap: 10px; align-items: center; justify-content: center;}
 </style>
 </head>
 <body>
@@ -508,38 +509,43 @@ const char HTML_UI[] = R"raw_html(
         
         <!-- Temp Automation Card -->
         <div class="card">
-            <h2>Auto-Trigger Action</h2>
-            <div class="text-sm">Automatically trigger an IR command when the temperature reaches a specific threshold.</div>
+            <h2>Auto-Trigger Actions</h2>
+            <div class="text-sm">Trigger IR commands based on temperature.</div>
             
+            <table id="autoTbl">
+                <thead><tr><th>Condition</th><th>Threshold</th><th>Action</th><th></th></tr></thead>
+                <tbody id="autoBody"></tbody>
+            </table>
+
             <div class="flex-row" style="margin-top: 15px;">
                 <select id="a_cond" style="margin:0; flex:1;">
-                    <option value="1">Temp Is &ge;</option>
-                    <option value="0">Temp Is &le;</option>
+                    <option value="1">Temp &ge;</option>
+                    <option value="0">Temp &le;</option>
                 </select>
                 <input type="number" id="a_thresh" step="0.5" style="margin:0; flex:1;" placeholder="25.0">
                 <div class="text-sm" style="margin:0;">&deg;C</div>
             </div>
             
-            <select id="a_cmd" style="margin-top: 15px;">
-                <option value="0">AC OFF</option>
-                <option value="1">AC ON</option>
-                <option value="2">Set 19C</option>
-                <option value="3">Set 20C</option>
-                <option value="4">Set 21C</option>
-                <option value="5">Set 22C</option>
-                <option value="6">Set 23C</option>
-                <option value="7">Set 24C</option>
-                <option value="8">Set 25C</option>
-                <option value="9">Set 26C</option>
-                <option value="10">Set 27C</option>
-                <option value="11">Mode HOT</option>
-                <option value="12">Mode COLD</option>
-            </select>
-            
-            <div class="flex-row">
-                <button id="btn_auto_enable" class="btn-gray" onclick="toggleAuto()">Enable</button>
-                <button class="btn-green" onclick="saveAuto()">Save Automation</button>
+            <div class="flex-row" style="margin-top: 15px;">
+                <select id="a_cmd" style="margin:0; flex:1;">
+                    <option value="0">AC OFF</option>
+                    <option value="1">AC ON</option>
+                    <option value="2">Set 19C</option>
+                    <option value="3">Set 20C</option>
+                    <option value="4">Set 21C</option>
+                    <option value="5">Set 22C</option>
+                    <option value="6">Set 23C</option>
+                    <option value="7">Set 24C</option>
+                    <option value="8">Set 25C</option>
+                    <option value="9">Set 26C</option>
+                    <option value="10">Set 27C</option>
+                    <option value="11">Mode HOT</option>
+                    <option value="12">Mode COLD</option>
+                </select>
+                <button class="btn-add" onclick="addAuto()">Add +</button>
             </div>
+            
+            <button class="btn-green" style="margin-top:20px;" onclick="saveAutos()">Save Automations to Device</button>
             <p id="astat" class="text-sm" style="margin-top:10px;"></p>
         </div>
 
@@ -557,26 +563,29 @@ const char HTML_UI[] = R"raw_html(
                 <option value="5">Friday</option><option value="6">Saturday</option>
             </select>
             <input type="time" id="t_time">
-            <select id="t_cmd">
-                <option value="0">AC OFF</option>
-                <option value="1">AC ON</option>
-                <option value="2">Set 19C</option>
-                <option value="3">Set 20C</option>
-                <option value="4">Set 21C</option>
-                <option value="5">Set 22C</option>
-                <option value="6">Set 23C</option>
-                <option value="7">Set 24C</option>
-                <option value="8">Set 25C</option>
-                <option value="9">Set 26C</option>
-                <option value="10">Set 27C</option>
-                <option value="11">Mode HOT</option>
-                <option value="12">Mode COLD</option>
-                <option value="13">Server OFF</option>
-                <option value="14">Server ON</option>
-            </select>
             
-            <button class="btn-blue" onclick="addTimer()">Add Timer</button>
-            <button class="btn-green" onclick="saveTimers()">Save Timers to Device</button>
+            <div class="flex-row">
+                <select id="t_cmd" style="margin:0; flex:1;">
+                    <option value="0">AC OFF</option>
+                    <option value="1">AC ON</option>
+                    <option value="2">Set 19C</option>
+                    <option value="3">Set 20C</option>
+                    <option value="4">Set 21C</option>
+                    <option value="5">Set 22C</option>
+                    <option value="6">Set 23C</option>
+                    <option value="7">Set 24C</option>
+                    <option value="8">Set 25C</option>
+                    <option value="9">Set 26C</option>
+                    <option value="10">Set 27C</option>
+                    <option value="11">Mode HOT</option>
+                    <option value="12">Mode COLD</option>
+                    <option value="13">Server OFF</option>
+                    <option value="14">Server ON</option>
+                </select>
+                <button class="btn-add" onclick="addTimer()">Add +</button>
+            </div>
+            
+            <button class="btn-green" style="margin-top:20px;" onclick="saveTimers()">Save Timers to Device</button>
             <p id="tstat" class="text-sm" style="margin-top:10px;"></p>
         </div>
 
@@ -600,10 +609,10 @@ const char HTML_UI[] = R"raw_html(
 
     <script>
         let timers = [];
-        let auto_en = false;
-        let firstLoad = true;
+        let autos = [];
         const days = {'-1':'Everyday','0':'Sun','1':'Mon','2':'Tue','3':'Wed','4':'Thu','5':'Fri','6':'Sat'};
         const cmds = {'0':'OFF','1':'ON','2':'19C','3':'20C','4':'21C','5':'22C','6':'23C','7':'24C','8':'25C','9':'26C','10':'27C','11':'HOT','12':'COLD','13':'SRV OFF','14':'SRV ON'};
+        const conds = {'0':'&le;', '1':'&ge;'};
         
         function c(cmd){
             document.getElementById('cstat').innerText = 'Sending...';
@@ -613,36 +622,69 @@ const char HTML_UI[] = R"raw_html(
             });
         }
         
-        function toggleAuto() {
-            auto_en = !auto_en;
-            updateAutoBtn();
+        // ---- AUTOMATIONS LOGIC ----
+        function renderAutos(){
+            let b = document.getElementById('autoBody');
+            b.innerHTML = '';
+            autos.forEach((a, i)=>{
+                let tr = document.createElement('tr');
+                tr.innerHTML = `<td>Temp ${conds[a.c]}</td><td>${a.t}&deg;C</td><td>${cmds[a.cmd]}</td><td><button class="del-btn" onclick="delAuto(${i})">X</button></td>`;
+                b.appendChild(tr);
+            });
         }
-        
-        function updateAutoBtn() {
-            let btn = document.getElementById('btn_auto_enable');
-            if(auto_en) {
-                btn.className = 'btn-blue';
-                btn.innerText = 'Enabled (Click Disable)';
-            } else {
-                btn.className = 'btn-gray';
-                btn.innerText = 'Disabled (Click Enable)';
-            }
+
+        function addAuto(){
+            let cStr = document.getElementById('a_cond').value;
+            let tStr = document.getElementById('a_thresh').value;
+            let cmdStr = document.getElementById('a_cmd').value;
+            if(!tStr) return alert('Enter a valid temperature threshold.');
+            
+            autos.push({ c: parseInt(cStr), t: parseFloat(tStr), cmd: parseInt(cmdStr) });
+            renderAutos();
         }
-        
-        function saveAuto(){
-            let payload = {
-                en: auto_en ? 1 : 0,
-                t: parseFloat(document.getElementById('a_thresh').value),
-                c: parseInt(document.getElementById('a_cond').value),
-                cmd: parseInt(document.getElementById('a_cmd').value)
-            };
+
+        function delAuto(i){ autos.splice(i, 1); renderAutos(); }
+
+        function saveAutos(){
             document.getElementById('astat').innerText = 'Saving...';
-            fetch('/auto', {method:'POST', body:JSON.stringify(payload)}).then(()=>{
+            fetch('/auto', {method:'POST', body:JSON.stringify(autos)}).then(()=>{
                 document.getElementById('astat').innerText = 'Saved!';
                 setTimeout(() => document.getElementById('astat').innerText='', 2000);
             });
         }
-        
+
+        // ---- TIMERS LOGIC ----
+        function renderTimers(){
+            let b = document.getElementById('timersBody');
+            b.innerHTML = '';
+            timers.forEach((t, i)=>{
+                let tr = document.createElement('tr');
+                tr.innerHTML = `<td>${days[t.d]}</td><td>${t.h.toString().padStart(2,'0')}:${t.m.toString().padStart(2,'0')}</td><td>${cmds[t.c]}</td><td><button class="del-btn" onclick="delTimer(${i})">X</button></td>`;
+                b.appendChild(tr);
+            });
+        }
+
+        function addTimer(){
+            let d = parseInt(document.getElementById('t_day').value);
+            let timeStr = document.getElementById('t_time').value;
+            let c = parseInt(document.getElementById('t_cmd').value);
+            if(!timeStr) return alert('Select a valid time.');
+            let parts = timeStr.split(':');
+            timers.push({ d:d, h:parseInt(parts[0]), m:parseInt(parts[1]), c:c });
+            renderTimers();
+        }
+
+        function delTimer(i){ timers.splice(i, 1); renderTimers(); }
+
+        function saveTimers(){
+            document.getElementById('tstat').innerText = 'Saving...';
+            fetch('/timers', { method:'POST', body:JSON.stringify(timers) }).then(()=>{
+                document.getElementById('tstat').innerText = 'Saved!';
+                setTimeout(() => document.getElementById('tstat').innerText='', 2000);
+            });
+        }
+
+        // ---- SYSTEM LOGIC ----
         function scan(){
             document.getElementById('status').innerText = 'Scanning...';
             fetch('/scan').then(r=>r.json()).then(d=>{
@@ -669,6 +711,7 @@ const char HTML_UI[] = R"raw_html(
             if(confirm("Switch to Wi-Fi Mode and reboot?")) fetch('/switch_to_wifi', { method: 'POST' }).then(() => alert('Rebooting...'));
         }
 
+        let isInitialLoad = true;
         function loadStatus(){
             fetch('/status').then(r=>r.json()).then(d=>{
                 document.getElementById('curtime').innerText = d.time;
@@ -676,47 +719,13 @@ const char HTML_UI[] = R"raw_html(
                 document.getElementById('curtemp').innerText = d.temp.toFixed(1);
                 document.getElementById('curhum').innerText = d.hum.toFixed(1);
                 
-                if(firstLoad && d.auto) {
-                    auto_en = d.auto.en === 1;
-                    document.getElementById('a_thresh').value = d.auto.t;
-                    document.getElementById('a_cond').value = d.auto.c;
-                    document.getElementById('a_cmd').value = d.auto.cmd;
-                    updateAutoBtn();
-                    firstLoad = false;
+                if (isInitialLoad) {
+                    timers = d.timers || [];
+                    autos = d.autos || [];
+                    renderTimers();
+                    renderAutos();
+                    isInitialLoad = false;
                 }
-                
-                timers = d.timers || [];
-                renderTimers();
-            });
-        }
-
-        function renderTimers(){
-            let b = document.getElementById('timersBody');
-            b.innerHTML = '';
-            timers.forEach((t, i)=>{
-                let tr = document.createElement('tr');
-                tr.innerHTML = `<td>${days[t.d]}</td><td>${t.h.toString().padStart(2,'0')}:${t.m.toString().padStart(2,'0')}</td><td>${cmds[t.c]}</td><td><button class="timer-del" onclick="delTimer(${i})">X</button></td>`;
-                b.appendChild(tr);
-            });
-        }
-
-        function addTimer(){
-            let d = parseInt(document.getElementById('t_day').value);
-            let timeStr = document.getElementById('t_time').value;
-            let c = parseInt(document.getElementById('t_cmd').value);
-            if(!timeStr) return alert('Select time');
-            let parts = timeStr.split(':');
-            timers.push({ d:d, h:parseInt(parts[0]), m:parseInt(parts[1]), c:c });
-            renderTimers();
-        }
-
-        function delTimer(i){ timers.splice(i, 1); renderTimers(); }
-
-        function saveTimers(){
-            document.getElementById('tstat').innerText = 'Saving...';
-            fetch('/timers', { method:'POST', body:JSON.stringify(timers) }).then(()=>{
-                document.getElementById('tstat').innerText = 'Saved!';
-                setTimeout(() => document.getElementById('tstat').innerText='', 2000);
             });
         }
 
@@ -770,35 +779,53 @@ static esp_err_t ir_get_handler(httpd_req_t *req) {
 }
 
 static esp_err_t auto_post_handler(httpd_req_t *req) {
-    char buf[256];
+    char buf[1024];
     int ret, remaining = req->content_len;
     if (remaining >= (int)sizeof(buf)) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Payload too large");
         return ESP_FAIL;
     }
     
-    if ((ret = httpd_req_recv(req, buf, remaining)) <= 0) return ESP_FAIL;
+    if ((ret = httpd_req_recv(req, buf, remaining)) <= 0) {
+        return ESP_FAIL;
+    }
     buf[ret] = '\0';
     
-    cJSON *json = cJSON_Parse(buf);
-    if(json) {
-        cJSON *en = cJSON_GetObjectItem(json, "en");
-        cJSON *t = cJSON_GetObjectItem(json, "t");
-        cJSON *c = cJSON_GetObjectItem(json, "c");
-        cJSON *cmd = cJSON_GetObjectItem(json, "cmd");
-        
-        if(en && t && c && cmd) {
-            auto_config.enabled = en->valueint;
-            auto_config.threshold = t->valuedouble;
-            auto_config.condition = c->valueint;
-            auto_config.command = cmd->valueint;
-            
-            auto_condition_met_last = false; // Reset threshold blocker on save
-            save_auto_config();
+    cJSON *arr = cJSON_Parse(buf);
+    if (arr && cJSON_IsArray(arr)) {
+        if (xSemaphoreTake(auto_mutex, portMAX_DELAY)) {
+            num_autos = 0;
+            int size = cJSON_GetArraySize(arr);
+            for(int i = 0; i < size && i < MAX_AUTOS; i++) {
+                cJSON *item = cJSON_GetArrayItem(arr, i);
+                cJSON *c = cJSON_GetObjectItem(item, "c");
+                cJSON *t = cJSON_GetObjectItem(item, "t");
+                cJSON *cmd = cJSON_GetObjectItem(item, "cmd");
+                if(c && t && cmd) {
+                    auto_rules[num_autos].condition = c->valueint;
+                    auto_rules[num_autos].threshold = t->valuedouble;
+                    auto_rules[num_autos].command = cmd->valueint;
+                    auto_triggered[num_autos] = false; // Freshly created/saved rules can trigger immediately
+                    num_autos++;
+                }
+            }
+            xSemaphoreGive(auto_mutex);
         }
-        cJSON_Delete(json);
+        
+        cJSON_Delete(arr);
+        
+        // Push safely to NVS
+        nvs_handle_t my_handle;
+        if(nvs_open("storage", NVS_READWRITE, &my_handle) == ESP_OK) {
+            nvs_set_blob(my_handle, "auto_rules", auto_rules, sizeof(AutoEntry) * num_autos);
+            nvs_set_u32(my_handle, "num_autos", num_autos);
+            nvs_commit(my_handle);
+            nvs_close(my_handle);
+        }
+        
         httpd_resp_sendstr(req, "OK");
     } else {
+        if (arr) cJSON_Delete(arr);
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON parameters provided");
         return ESP_FAIL;
     }
@@ -825,13 +852,21 @@ static esp_err_t status_get_handler(httpd_req_t *req) {
     cJSON_AddNumberToObject(root, "temp", current_temp);
     cJSON_AddNumberToObject(root, "hum", current_hum);
     
-    cJSON *aut = cJSON_CreateObject();
-    cJSON_AddNumberToObject(aut, "en", auto_config.enabled);
-    cJSON_AddNumberToObject(aut, "t", auto_config.threshold);
-    cJSON_AddNumberToObject(aut, "c", auto_config.condition);
-    cJSON_AddNumberToObject(aut, "cmd", auto_config.command);
-    cJSON_AddItemToObject(root, "auto", aut);
+    // Package automation rules array
+    cJSON *autos_arr = cJSON_CreateArray();
+    if (xSemaphoreTake(auto_mutex, portMAX_DELAY)) {
+        for(int i = 0; i < num_autos; i++) {
+            cJSON *a = cJSON_CreateObject();
+            cJSON_AddNumberToObject(a, "c", auto_rules[i].condition);
+            cJSON_AddNumberToObject(a, "t", auto_rules[i].threshold);
+            cJSON_AddNumberToObject(a, "cmd", auto_rules[i].command);
+            cJSON_AddItemToArray(autos_arr, a);
+        }
+        xSemaphoreGive(auto_mutex);
+    }
+    cJSON_AddItemToObject(root, "autos", autos_arr);
     
+    // Package timers array
     cJSON *timers_arr = cJSON_CreateArray();
     if (xSemaphoreTake(timer_mutex, portMAX_DELAY)) {
         for(int i = 0; i < num_timers; i++) {
@@ -1235,11 +1270,13 @@ extern "C" void app_main(void) {
                                                         &instance_got_ip));
 
     init_uart();
+    
     timer_mutex = xSemaphoreCreateMutex();
+    auto_mutex = xSemaphoreCreateMutex();
     
     // Resume established logic rules securely stored in NV memory
     load_timers();
-    load_auto_config(); // Load Temp Automation Settings
+    load_auto_config();
     
     // Start timers and temp polling tasks
     xTaskCreate(timer_task, "timer_task", 4096, NULL, 5, NULL);
