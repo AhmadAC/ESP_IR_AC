@@ -13,6 +13,11 @@
 
 static const char *TAG = "UTILS";
 
+void delayed_reboot_task(void *pvParameter) {
+    vTaskDelay(pdMS_TO_TICKS(1500));
+    esp_restart();
+}
+
 void boot_button_task(void *pvParameter) {
     gpio_set_direction(BOOT_BUTTON_PIN, GPIO_MODE_INPUT);
     gpio_set_pull_mode(BOOT_BUTTON_PIN, GPIO_PULLUP_ONLY);
