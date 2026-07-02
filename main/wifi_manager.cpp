@@ -1,3 +1,4 @@
+// main/wifi_manager.cpp
 #include "wifi_manager.h"
 #include "web_server.h"
 #include "config.h"
@@ -23,17 +24,21 @@ static TaskHandle_t dns_task_handle = NULL;
 void dns_server_task(void *pvParameters) {
     uint8_t rx_buffer[512]; 
     struct sockaddr_in dest_addr;
+    memset(&dest_addr, 0, sizeof(dest_addr)); // Crucial zero-init for socket binding
     dest_addr.sin_addr.s_addr = htonl(INADDR_ANY);
     dest_addr.sin_family = AF_INET;
     dest_addr.sin_port = htons(53);
     
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) {
+        ESP_LOGE(TAG, "Failed to create DNS socket");
         dns_task_handle = NULL;
         vTaskDelete(NULL);
         return;
     }
+    
     if (bind(sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr)) < 0) {
+        ESP_LOGE(TAG, "Failed to bind DNS socket");
         close(sock);
         dns_task_handle = NULL;
         vTaskDelete(NULL);
@@ -45,14 +50,16 @@ void dns_server_task(void *pvParameters) {
     while (1) {
         struct sockaddr_in source_addr;
         socklen_t socklen = sizeof(source_addr);
+        memset(&source_addr, 0, sizeof(source_addr));
         
         int len = recvfrom(sock, rx_buffer, sizeof(rx_buffer) - 32, 0, (struct sockaddr *)&source_addr, &socklen);
         
         if (len < 0) {
-            vTaskDelay(pdMS_TO_TICKS(1000));
+            vTaskDelay(pdMS_TO_TICKS(500));
             continue;
         }
         
+        // Very basic DNS responder to redirect captive portal queries to 192.168.4.1
         if (len > 12) {
             rx_buffer[2] = 0x81; 
             rx_buffer[3] = 0x80;
@@ -107,8 +114,6 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t e
         } else {
             ESP_LOGW(TAG, "Connection attempts exhausted. Rolling back to AP Config Portal...");
             s_ap_fallback_active = true;
-            // DANGER: Calling esp_wifi_stop() inside the event loop dispatcher causes a kernel deadlock.
-            // Spawning a micro-task isolates the call securely.
             xTaskCreate(ap_fallback_task, "ap_fallback", 4096, NULL, 5, NULL);
         }
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_STACONNECTED) {

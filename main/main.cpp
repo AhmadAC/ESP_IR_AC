@@ -37,16 +37,12 @@ extern "C" void app_main(void) {
     xTaskCreate(timer_task, "timer_task", 4096, NULL, 5, NULL);
     xTaskCreate(dht_task, "dht_task", 4096, NULL, 5, NULL);
     xTaskCreate(boot_button_task, "button_task", 2048, NULL, 10, NULL);
-    xTaskCreate(console_read_task, "console_read_task", 4096, NULL, 5, NULL);
 
     // 5. Initialize Network directly in main task
     wifi_init_and_connect();
 
     // 6. Prevent the main task from returning.
-    // Exiting app_main deletes the main_task, which can abruptly tear down 
-    // the VFS environment for USB-Serial-JTAG, causing kernel panics in 
-    // background console tasks. We turn this into a safe idle thread.
-    ESP_LOGI("SYSTEM", "Main task initialization complete. Entering idle loop.");
+    ESP_LOGI("SYSTEM", "Main task initialization complete. System running...");
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(10000));
     }
