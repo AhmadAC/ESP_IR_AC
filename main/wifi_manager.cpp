@@ -10,6 +10,7 @@
 #include "esp_sntp.h"
 #include "esp_mac.h"
 #include "nvs.h"
+#include <string.h>
 
 static const char *TAG = "WIFI_MGR";
 static int s_retry_num = 0;
@@ -17,28 +18,44 @@ bool s_ap_fallback_active = false;
 static TaskHandle_t dns_task_handle = NULL;
 
 void dns_server_task(void *pvParameters) {
-    char rx_buffer[128];
+    uint8_t rx_buffer[512]; // Increased buffer size to safely prevent overflows
     struct sockaddr_in dest_addr;
     dest_addr.sin_addr.s_addr = htonl(INADDR_ANY);
     dest_addr.sin_family = AF_INET;
     dest_addr.sin_port = htons(53);
     
-    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
-    if (sock < 0) { vTaskDelete(NULL); return; }
-    if (bind(sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr)) < 0) { close(sock); vTaskDelete(NULL); return; }
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0) {
+        vTaskDelete(NULL);
+        return;
+    }
+    if (bind(sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr)) < 0) {
+        close(sock);
+        vTaskDelete(NULL);
+        return;
+    }
     
     ESP_LOGI(TAG, "DNS Server listening on port 53");
 
     while (1) {
-        struct sockaddr_storage source_addr;
+        struct sockaddr_in source_addr;
         socklen_t socklen = sizeof(source_addr);
-        int len = recvfrom(sock, rx_buffer, sizeof(rx_buffer) - 1, 0, (struct sockaddr *)&source_addr, &socklen);
         
-        if (len < 0) { vTaskDelay(pdMS_TO_TICKS(1000)); continue; }
+        // Read up to buffer size minus 32 bytes safety buffer for the appended answer
+        int len = recvfrom(sock, rx_buffer, sizeof(rx_buffer) - 32, 0, (struct sockaddr *)&source_addr, &socklen);
+        
+        if (len < 0) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+        
         if (len > 12) {
-            rx_buffer[2] = 0x81; rx_buffer[3] = 0x80;
-            rx_buffer[6] = rx_buffer[4]; rx_buffer[7] = rx_buffer[5];
-            rx_buffer[8] = 0; rx_buffer[9] = 0; rx_buffer[10] = 0; rx_buffer[11] = 0; 
+            rx_buffer[2] = 0x81; 
+            rx_buffer[3] = 0x80;
+            rx_buffer[6] = rx_buffer[4]; 
+            rx_buffer[7] = rx_buffer[5];
+            rx_buffer[8] = 0; rx_buffer[9] = 0; 
+            rx_buffer[10] = 0; rx_buffer[11] = 0; 
             
             int pos = len;
             rx_buffer[pos++] = 0xC0; rx_buffer[pos++] = 0x0C;
