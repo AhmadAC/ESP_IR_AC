@@ -7,4 +7,4 @@ idf_component_register(SRCS "main.cpp"
                             "wifi_manager.cpp"
                             "system_utils.cpp"
                        INCLUDE_DIRS "."
-                       REQUIRES nvs_flash esp_wifi esp_http_server json driver esp_netif mdns)
+                       REQUIRES nvs_flash esp_wifi esp_http_server json driver esp_netif mdns esp_timer)
