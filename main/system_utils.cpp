@@ -6,12 +6,20 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "nvs.h"
 #include <unistd.h>
 #include <fcntl.h>
 #include <string.h>
 
 static const char *TAG = "UTILS";
+
+void delayed_reboot_task(void *pvParameter) {
+    ESP_LOGI(TAG, "Rebooting in 2 seconds...");
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    esp_restart();
+    vTaskDelete(NULL);
+}
 
 void boot_button_task(void *pvParameter) {
     gpio_set_direction(BOOT_BUTTON_PIN, GPIO_MODE_INPUT);
