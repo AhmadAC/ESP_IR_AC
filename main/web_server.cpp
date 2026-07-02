@@ -11,6 +11,12 @@
 #include "esp_log.h"
 #include "esp_wifi.h"
 
+// Standard libraries required for time, memory, and string parsing
+#include <time.h>
+#include <sys/time.h>
+#include <string.h>
+#include <stdlib.h>
+
 static const char *TAG = "WEB_SERVER";
 httpd_handle_t server = NULL;
 bool server_disabled_by_timer = false;
