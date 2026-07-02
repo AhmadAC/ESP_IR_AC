@@ -1,3 +1,4 @@
+// main/ir_uart.cpp
 #include "ir_uart.h"
 #include "ir_codes.h"
 #include "config.h"
@@ -7,6 +8,7 @@
 
 static const char *TAG = "IR_UART";
 char last_command_str[32] = "None";
+int last_command_id = -1;
 
 void init_uart() {
     uart_config_t uart_config = {};
@@ -48,6 +50,7 @@ void send_uart_ir(const uint8_t* data, size_t data_len) {
 }
 
 void execute_command(int cmd) {
+    last_command_id = cmd;
     switch (cmd) {
         case 0:  strcpy(last_command_str, "AC OFF"); send_uart_ir(ir_off, ir_off_len); break;
         case 1:  strcpy(last_command_str, "AC ON"); send_uart_ir(ir_on, ir_on_len); break;

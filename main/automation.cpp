@@ -1,3 +1,4 @@
+// main/automation.cpp
 #include "automation.h"
 #include "ir_uart.h"
 #include "esp_log.h"
@@ -13,7 +14,6 @@ int num_timers = 0;
 SemaphoreHandle_t timer_mutex = NULL;
 
 AutoEntry auto_rules[MAX_AUTOS];
-bool auto_triggered[MAX_AUTOS];
 int num_autos = 0;
 SemaphoreHandle_t auto_mutex = NULL;
 
@@ -54,7 +54,6 @@ void load_auto_config() {
                 if(required_size > 0) {
                     nvs_get_blob(my_handle, "auto_rules", auto_rules, &required_size);
                 }
-                memset(auto_triggered, 0, sizeof(auto_triggered)); // Reset trigger states on boot
                 xSemaphoreGive(auto_mutex);
             }
         }

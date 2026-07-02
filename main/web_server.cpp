@@ -1,3 +1,4 @@
+// main/web_server.cpp
 #include "web_server.h"
 #include "config.h"
 #include "automation.h"
@@ -379,7 +380,6 @@ static esp_err_t auto_post_handler(httpd_req_t *req) {
                     auto_rules[num_autos].condition = c->valueint;
                     auto_rules[num_autos].threshold = t->valuedouble;
                     auto_rules[num_autos].command = cmd->valueint;
-                    auto_triggered[num_autos] = false; 
                     num_autos++;
                 }
             }

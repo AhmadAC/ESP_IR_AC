@@ -1,3 +1,4 @@
+// main/automation.h
 #pragma once
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -21,7 +22,6 @@ extern int num_timers;
 extern SemaphoreHandle_t timer_mutex;
 
 extern AutoEntry auto_rules[MAX_AUTOS];
-extern bool auto_triggered[MAX_AUTOS];
 extern int num_autos;
 extern SemaphoreHandle_t auto_mutex;
 

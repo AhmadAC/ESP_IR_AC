@@ -1,3 +1,4 @@
+// main/dht_sensor.cpp
 #include "dht_sensor.h"
 #include "config.h"
 #include "automation.h"
@@ -74,13 +75,11 @@ void dht_task(void *pvParameter) {
                     if (auto_rules[i].condition == 1 && current_temp >= auto_rules[i].threshold) condition_met = true;
                     if (auto_rules[i].condition == 0 && current_temp <= auto_rules[i].threshold) condition_met = true;
                     
-                    if (condition_met && !auto_triggered[i]) {
+                    if (condition_met && last_command_id != auto_rules[i].command) {
                         ESP_LOGI(TAG, "Automation %d Triggered! Temp: %.1f, Thresh: %.1f, Cmd: %d", 
                                  i, current_temp, auto_rules[i].threshold, auto_rules[i].command);
                         execute_command(auto_rules[i].command);
                     }
-                    
-                    auto_triggered[i] = condition_met;
                 }
                 xSemaphoreGive(auto_mutex);
             }

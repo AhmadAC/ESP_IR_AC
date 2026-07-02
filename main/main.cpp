@@ -4,6 +4,7 @@
 #include "esp_netif.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_log.h"
 
 // Custom Modules
 #include "config.h"
@@ -22,6 +23,7 @@ extern "C" void app_main(void) {
     }
 
     // 2. Core Initializations
+    esp_log_level_set("wifi", ESP_LOG_WARN);
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     
