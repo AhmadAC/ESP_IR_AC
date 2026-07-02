@@ -553,14 +553,25 @@ static esp_err_t scan_get_handler(httpd_req_t *req) {
     esp_wifi_scan_start(&scan_config, true);
     uint16_t ap_count = 0;
     esp_wifi_scan_get_ap_num(&ap_count);
-    wifi_ap_record_t *ap_info = (wifi_ap_record_t *)malloc(sizeof(wifi_ap_record_t) * ap_count);
-    esp_wifi_scan_get_ap_records(&ap_count, ap_info);
+    
     cJSON *root = cJSON_CreateArray();
-    for(int i = 0; i < ap_count; i++) cJSON_AddItemToArray(root, cJSON_CreateString((char*)ap_info[i].ssid));
+    if (ap_count > 0) {
+        wifi_ap_record_t *ap_info = (wifi_ap_record_t *)malloc(sizeof(wifi_ap_record_t) * ap_count);
+        if (ap_info) {
+            esp_wifi_scan_get_ap_records(&ap_count, ap_info);
+            for(int i = 0; i < ap_count; i++) {
+                cJSON_AddItemToArray(root, cJSON_CreateString((char*)ap_info[i].ssid));
+            }
+            free(ap_info);
+        }
+    }
+    
     char* json_str = cJSON_PrintUnformatted(root);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, json_str, strlen(json_str));
-    free(ap_info); cJSON_Delete(root); free(json_str);
+    
+    cJSON_Delete(root);
+    free(json_str);
     return ESP_OK;
 }
 

@@ -13,12 +13,6 @@
 #include "wifi_manager.h"
 #include "system_utils.h"
 
-// Dedicated task with a large stack to perform network initialization safely
-void system_init_task(void *pvParameter) {
-    wifi_init_and_connect();
-    vTaskDelete(NULL); // Self-delete when configuration is complete
-}
-
 extern "C" void app_main(void) {
     // 1. Initialize Non-Volatile Storage First
     esp_err_t ret = nvs_flash_init();
@@ -44,6 +38,6 @@ extern "C" void app_main(void) {
     xTaskCreate(boot_button_task, "button_task", 2048, NULL, 10, NULL);
     xTaskCreate(console_read_task, "console_read_task", 4096, NULL, 5, NULL);
 
-    // 5. Spawn stack-safe network setup task
-    xTaskCreate(system_init_task, "sys_init_task", 8192, NULL, 5, NULL);
+    // 5. Initialize Network directly in main task (16KB stack available via sdkconfig)
+    wifi_init_and_connect();
 }

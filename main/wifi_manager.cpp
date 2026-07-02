@@ -15,10 +15,11 @@
 static const char *TAG = "WIFI_MGR";
 static int s_retry_num = 0;
 bool s_ap_fallback_active = false;
+bool s_wifi_is_started = false; // State tracker to prevent uninitialized driver crashes
 static TaskHandle_t dns_task_handle = NULL;
 
 void dns_server_task(void *pvParameters) {
-    uint8_t rx_buffer[512]; // Increased buffer size to safely prevent overflows
+    uint8_t rx_buffer[512]; 
     struct sockaddr_in dest_addr;
     dest_addr.sin_addr.s_addr = htonl(INADDR_ANY);
     dest_addr.sin_family = AF_INET;
@@ -41,7 +42,6 @@ void dns_server_task(void *pvParameters) {
         struct sockaddr_in source_addr;
         socklen_t socklen = sizeof(source_addr);
         
-        // Read up to buffer size minus 32 bytes safety buffer for the appended answer
         int len = recvfrom(sock, rx_buffer, sizeof(rx_buffer) - 32, 0, (struct sockaddr *)&source_addr, &socklen);
         
         if (len < 0) {
@@ -135,7 +135,10 @@ void start_ap_server() {
     wifi_config.ap.max_connection = 4;
     wifi_config.ap.authmode = WIFI_AUTH_WPA2_PSK;
 
-    esp_wifi_stop();
+    if (s_wifi_is_started) {
+        esp_wifi_stop();
+        s_wifi_is_started = false;
+    }
 
     esp_netif_t *ap_netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
     if (ap_netif) {
@@ -151,6 +154,7 @@ void start_ap_server() {
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
+    s_wifi_is_started = true;
     ESP_LOGI(TAG, "SoftAP broadcast started! SSID: ESP32_AC_Config, IP: 192.168.4.1");
     
     if (dns_task_handle == NULL) {
@@ -166,10 +170,9 @@ void wifi_init_and_connect() {
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
-    esp_event_handler_instance_t instance_any_id;
-    esp_event_handler_instance_t instance_got_ip;
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, &instance_any_id));
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, &instance_got_ip));
+    // Passing NULL explicitly fixes stack deletion bugs tied to previous event handler parameters
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, NULL));
 
     nvs_handle_t my_handle;
     bool has_credentials = false;
@@ -189,6 +192,7 @@ void wifi_init_and_connect() {
             ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
             ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
             ESP_ERROR_CHECK(esp_wifi_start());
+            s_wifi_is_started = true;
             has_credentials = true;
         }
         nvs_close(my_handle);
