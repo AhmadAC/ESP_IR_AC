@@ -8,11 +8,20 @@
 #include "esp_rom_sys.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
+#include "esp_timer.h"
+#include <string.h>
 
-static const char *TAG = "DHT";
+static const char *TAG = "DHT_AUTO";
 float current_temp = 0.0;
 float current_hum = 0.0;
 static portMUX_TYPE dht_mux = portMUX_INITIALIZER_UNLOCKED;
+
+// Array to track the last time (in microseconds) each rule was triggered
+int64_t rule_last_trigger[MAX_AUTOS] = {0};
+
+void reset_automation_triggers() {
+    memset(rule_last_trigger, 0, sizeof(rule_last_trigger));
+}
 
 int wait_for_level(int level, int timeout_us) {
     int count = 0;
@@ -58,27 +67,51 @@ bool read_dht11(float *temp, float *hum) {
 
 void dht_task(void *pvParameter) {
     gpio_set_pull_mode(DHT_PIN, GPIO_PULLUP_ONLY);
+    int loop_counter = 0;
     
     while(1) {
+        // Read DHT sensor every 3 seconds
         vTaskDelay(pdMS_TO_TICKS(3000));
         
         float temp, hum;
-        if (read_dht11(&temp, &hum)) {
+        bool read_success = read_dht11(&temp, &hum);
+        
+        if (read_success) {
             current_temp = temp;
             current_hum = hum;
-            
-            // Handle Automation Triggers
+        }
+
+        // Only evaluate automation if we've successfully established a temperature reading since boot
+        if (current_temp > 0.0) {
             if (xSemaphoreTake(auto_mutex, portMAX_DELAY)) {
+                
+                // Print a heartbeat every 15 seconds (5 loops) so you know the task isn't frozen
+                if (loop_counter % 5 == 0) {
+                    ESP_LOGI(TAG, "Heartbeat | Temp: %.1f°C | Hum: %.1f%% | Active Rules: %d", current_temp, current_hum, num_autos);
+                }
+                loop_counter++;
+
+                int64_t now_us = esp_timer_get_time();
+
                 for (int i = 0; i < num_autos; i++) {
                     bool condition_met = false;
                     
                     if (auto_rules[i].condition == 1 && current_temp >= auto_rules[i].threshold) condition_met = true;
                     if (auto_rules[i].condition == 0 && current_temp <= auto_rules[i].threshold) condition_met = true;
                     
-                    if (condition_met && last_command_id != auto_rules[i].command) {
-                        ESP_LOGI(TAG, "Automation %d Triggered! Temp: %.1f, Thresh: %.1f, Cmd: %d", 
-                                 i, current_temp, auto_rules[i].threshold, auto_rules[i].command);
-                        execute_command(auto_rules[i].command);
+                    if (condition_met) {
+                        // Trigger if it has never triggered (0) OR if 5 minutes (300,000,000 us) have passed
+                        if (rule_last_trigger[i] == 0 || (now_us - rule_last_trigger[i]) >= 300000000LL) {
+                            
+                            ESP_LOGI(TAG, ">>> Automation Triggered! Temp (%.1f) %s %.1f. Executing Command: %d", 
+                                     current_temp, auto_rules[i].condition ? ">=" : "<=", auto_rules[i].threshold, auto_rules[i].command);
+                            
+                            execute_command(auto_rules[i].command);
+                            rule_last_trigger[i] = now_us;
+                        }
+                    } else {
+                        // If the temperature is safe again, reset the rate-limiter so it triggers instantly next time
+                        rule_last_trigger[i] = 0;
                     }
                 }
                 xSemaphoreGive(auto_mutex);

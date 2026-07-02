@@ -12,7 +12,6 @@
 #include "esp_log.h"
 #include "esp_wifi.h"
 
-// Standard libraries required for time, memory, and string parsing
 #include <time.h>
 #include <sys/time.h>
 #include <string.h>
@@ -230,9 +229,14 @@ const char HTML_UI[] = R"raw_html(
             
             autos.push({ c: parseInt(cStr), t: parseFloat(tStr), cmd: parseInt(cmdStr) });
             renderAutos();
+            saveAutos(); // Added: Automatically save to ESP32 on Add
         }
 
-        function delAuto(i){ autos.splice(i, 1); renderAutos(); }
+        function delAuto(i){ 
+            autos.splice(i, 1); 
+            renderAutos(); 
+            saveAutos(); // Added: Automatically save to ESP32 on Delete
+        }
 
         function saveAutos(){
             document.getElementById('astat').innerText = 'Saving...';
@@ -260,9 +264,14 @@ const char HTML_UI[] = R"raw_html(
             let parts = timeStr.split(':');
             timers.push({ d:d, h:parseInt(parts[0]), m:parseInt(parts[1]), c:c });
             renderTimers();
+            saveTimers(); // Added: Automatically save to ESP32 on Add
         }
 
-        function delTimer(i){ timers.splice(i, 1); renderTimers(); }
+        function delTimer(i){ 
+            timers.splice(i, 1); 
+            renderTimers(); 
+            saveTimers(); // Added: Automatically save to ESP32 on Delete
+        }
 
         function saveTimers(){
             document.getElementById('tstat').innerText = 'Saving...';
@@ -378,11 +387,19 @@ static esp_err_t auto_post_handler(httpd_req_t *req) {
                 cJSON *cmd = cJSON_GetObjectItem(item, "cmd");
                 if(c && t && cmd) {
                     auto_rules[num_autos].condition = c->valueint;
-                    auto_rules[num_autos].threshold = t->valuedouble;
+                    
+                    // Safely extract float regardless of how it was typed in frontend (string or int)
+                    float thresh = 0.0f;
+                    if (cJSON_IsNumber(t)) thresh = (float)t->valuedouble;
+                    else if (cJSON_IsString(t)) thresh = atof(t->valuestring);
+                    
+                    auto_rules[num_autos].threshold = thresh;
                     auto_rules[num_autos].command = cmd->valueint;
                     num_autos++;
                 }
             }
+            // Reset the 5-minute cooldown timer so the new rule can trigger instantly
+            reset_automation_triggers(); 
             xSemaphoreGive(auto_mutex);
         }
         
@@ -394,6 +411,7 @@ static esp_err_t auto_post_handler(httpd_req_t *req) {
             nvs_commit(my_handle);
             nvs_close(my_handle);
         }
+        ESP_LOGI(TAG, "Successfully parsed and saved %d automation rules.", num_autos);
         httpd_resp_sendstr(req, "OK");
     } else {
         if (arr) cJSON_Delete(arr);
