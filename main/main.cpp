@@ -17,6 +17,7 @@
 #include "esp_http_server.h"
 #include "esp_sntp.h"
 #include "esp_mac.h"
+#include "esp_rom_sys.h"
 #include "driver/gpio.h"
 #include "driver/uart.h"
 #include "cJSON.h"
@@ -31,6 +32,7 @@
 #define UART_PORT_NUM UART_NUM_1
 #define TXD_PIN (GPIO_NUM_17) // Wire to IR Module RXD
 #define RXD_PIN (GPIO_NUM_18) // Wire to IR Module TXD
+#define DHT_PIN (GPIO_NUM_4)  // Wire to DHT11 'S' (Signal) pin
 #define BOOT_BUTTON_PIN GPIO_NUM_0 
 #define MAXIMUM_RETRY 5
 
@@ -55,9 +57,129 @@ TimerEntry timers[MAX_TIMERS];
 int num_timers = 0;
 SemaphoreHandle_t timer_mutex = NULL;
 
+// Automation & Sensor Variables
+float current_temp = 0.0;
+float current_hum = 0.0;
+bool auto_condition_met_last = false;
+static portMUX_TYPE dht_mux = portMUX_INITIALIZER_UNLOCKED;
+
+struct {
+    int enabled;
+    float threshold;
+    int condition; // 0 = Below or equal, 1 = Above or equal
+    int command;
+} auto_config = {0, 25.0, 1, 1}; // Default state
+
 void start_web_server();
 void start_ap_server();
 void execute_command(int cmd);
+
+/* ==============================================
+   NVS DATA PERSISTENCE
+   ============================================== */
+void load_auto_config() {
+    nvs_handle_t my_handle;
+    if(nvs_open("storage", NVS_READONLY, &my_handle) == ESP_OK) {
+        nvs_get_i32(my_handle, "auto_en", (int32_t*)&auto_config.enabled);
+        uint32_t t_thresh;
+        if(nvs_get_u32(my_handle, "auto_thr", &t_thresh) == ESP_OK) {
+            float *f = (float*)&t_thresh;
+            auto_config.threshold = *f;
+        }
+        nvs_get_i32(my_handle, "auto_con", (int32_t*)&auto_config.condition);
+        nvs_get_i32(my_handle, "auto_cmd", (int32_t*)&auto_config.command);
+        nvs_close(my_handle);
+        ESP_LOGI(TAG, "Loaded Automation Config: EN=%d, THR=%.1f, CON=%d, CMD=%d", 
+                 auto_config.enabled, auto_config.threshold, auto_config.condition, auto_config.command);
+    }
+}
+
+void save_auto_config() {
+    nvs_handle_t my_handle;
+    if(nvs_open("storage", NVS_READWRITE, &my_handle) == ESP_OK) {
+        nvs_set_i32(my_handle, "auto_en", auto_config.enabled);
+        uint32_t *t_thresh = (uint32_t*)&auto_config.threshold;
+        nvs_set_u32(my_handle, "auto_thr", *t_thresh);
+        nvs_set_i32(my_handle, "auto_con", auto_config.condition);
+        nvs_set_i32(my_handle, "auto_cmd", auto_config.command);
+        nvs_commit(my_handle);
+        nvs_close(my_handle);
+    }
+}
+
+/* ==============================================
+   DHT11 SENSOR POLLING
+   ============================================== */
+int wait_for_level(int level, int timeout_us) {
+    int count = 0;
+    while (gpio_get_level(DHT_PIN) == level) {
+        if (count++ > timeout_us) return -1;
+        esp_rom_delay_us(1);
+    }
+    return count;
+}
+
+bool read_dht11(float *temp, float *hum) {
+    uint8_t data[5] = {0, 0, 0, 0, 0};
+    
+    gpio_set_direction(DHT_PIN, GPIO_MODE_OUTPUT);
+    gpio_set_level(DHT_PIN, 0);
+    vTaskDelay(pdMS_TO_TICKS(20)); // Wake up standard is 18ms-20ms low
+    gpio_set_level(DHT_PIN, 1);
+    esp_rom_delay_us(30);
+    gpio_set_direction(DHT_PIN, GPIO_MODE_INPUT);
+    
+    portENTER_CRITICAL(&dht_mux);
+    if (wait_for_level(1, 100) < 0) { portEXIT_CRITICAL(&dht_mux); return false; }
+    if (wait_for_level(0, 100) < 0) { portEXIT_CRITICAL(&dht_mux); return false; }
+    if (wait_for_level(1, 100) < 0) { portEXIT_CRITICAL(&dht_mux); return false; }
+    
+    for (int i = 0; i < 40; i++) {
+        if (wait_for_level(0, 100) < 0) { portEXIT_CRITICAL(&dht_mux); return false; }
+        int t = wait_for_level(1, 100);
+        if (t < 0) { portEXIT_CRITICAL(&dht_mux); return false; }
+        
+        data[i / 8] <<= 1;
+        if (t > 40) data[i / 8] |= 1;
+    }
+    portEXIT_CRITICAL(&dht_mux);
+    
+    if (data[4] == ((data[0] + data[1] + data[2] + data[3]) & 0xFF)) {
+        *hum = data[0] + (data[1] * 0.1);
+        *temp = data[2] + (data[3] * 0.1);
+        return true;
+    }
+    return false;
+}
+
+void dht_task(void *pvParameter) {
+    gpio_set_pull_mode(DHT_PIN, GPIO_PULLUP_ONLY); // Provide internal pull-up fallback
+    
+    while(1) {
+        vTaskDelay(pdMS_TO_TICKS(3000)); // Sample every 3 seconds
+        
+        float temp, hum;
+        if (read_dht11(&temp, &hum)) {
+            current_temp = temp;
+            current_hum = hum;
+            
+            // Handle Automation Trigger
+            if (auto_config.enabled) {
+                bool condition_met = false;
+                if (auto_config.condition == 1 && current_temp >= auto_config.threshold) condition_met = true;
+                if (auto_config.condition == 0 && current_temp <= auto_config.threshold) condition_met = true;
+                
+                if (condition_met && !auto_condition_met_last) {
+                    ESP_LOGI(TAG, "Automation Triggered! Temp: %.1f, Thresh: %.1f, Executing Cmd: %d", 
+                             current_temp, auto_config.threshold, auto_config.command);
+                    execute_command(auto_config.command);
+                }
+                auto_condition_met_last = condition_met; // Record state so it doesn't loop forever
+            }
+        }
+    }
+}
+
 
 /* ==============================================
    DNS CAPTIVE PORTAL TASK
@@ -98,7 +220,6 @@ void dns_server_task(void *pvParameters) {
         }
 
         if (len > 12) {
-            // Very basic DNS response to forward all traffic to 192.168.4.1 (The AP IP)
             rx_buffer[2] = 0x81; // Flags: Standard query response, No error
             rx_buffer[3] = 0x80;
             rx_buffer[6] = rx_buffer[4]; // Answer RRs = Question RRs
@@ -107,28 +228,14 @@ void dns_server_task(void *pvParameters) {
             rx_buffer[10] = 0; rx_buffer[11] = 0; // Additional RRs
             
             int pos = len;
-            // Answer header (Pointer to question)
-            rx_buffer[pos++] = 0xC0;
-            rx_buffer[pos++] = 0x0C;
-            // Type A
-            rx_buffer[pos++] = 0x00;
-            rx_buffer[pos++] = 0x01;
-            // Class IN
-            rx_buffer[pos++] = 0x00;
-            rx_buffer[pos++] = 0x01;
-            // TTL (60)
-            rx_buffer[pos++] = 0x00;
-            // IP Address (192.168.4.1)
-            rx_buffer[pos++] = 0x00;
-            rx_buffer[pos++] = 0x00;
-            rx_buffer[pos++] = 0x3C;
-            // Data length (4)
-            rx_buffer[pos++] = 0x00;
-            rx_buffer[pos++] = 0x04;
-            rx_buffer[pos++] = 192;
-            rx_buffer[pos++] = 168;
-            rx_buffer[pos++] = 4;
-            rx_buffer[pos++] = 1;
+            rx_buffer[pos++] = 0xC0; rx_buffer[pos++] = 0x0C;
+            rx_buffer[pos++] = 0x00; rx_buffer[pos++] = 0x01;
+            rx_buffer[pos++] = 0x00; rx_buffer[pos++] = 0x01;
+            rx_buffer[pos++] = 0x00; rx_buffer[pos++] = 0x00;
+            rx_buffer[pos++] = 0x00; rx_buffer[pos++] = 0x3C;
+            rx_buffer[pos++] = 0x00; rx_buffer[pos++] = 0x04;
+            rx_buffer[pos++] = 192;  rx_buffer[pos++] = 168;
+            rx_buffer[pos++] = 4;    rx_buffer[pos++] = 1;
             
             sendto(sock, rx_buffer, pos, 0, (struct sockaddr *)&source_addr, sizeof(source_addr));
         }
@@ -345,16 +452,30 @@ const char HTML_UI[] = R"raw_html(
     .btn-gray { background: #475569; }
     .status-bar { padding: 12px; border-radius: 10px; font-weight: bold; text-align: center; font-size: 0.85rem; border: 1px solid; text-transform: uppercase; background: #172554; color: #93c5fd; border-color: #3b82f6; margin-bottom:15px; }
     .text-sm { font-size: 0.85rem; color: #94a3b8; margin-bottom:10px; }
+    .sensor-val { font-size: 1.5rem; color: #38bdf8; font-weight: bold; }
     table { border-collapse: collapse; width: 100%; margin-bottom: 20px; font-size: 0.9rem; }
     th, td { border: 1px solid #475569; padding: 10px; text-align: center; }
     th { background: #0f172a; color: #0ea5e9; }
     .timer-del { background: #ef4444; padding: 5px; margin: 0; border-radius: 6px; }
+    .flex-row { display: flex; gap: 10px; align-items: center; }
 </style>
 </head>
 <body>
     <div class="container">
         <div class="status-bar">A/C CONTROLLER DASHBOARD</div>
         
+        <!-- Sensor Data Card -->
+        <div class="card" style="display:flex; justify-content:space-around;">
+            <div>
+                <div class="text-sm">Temperature</div>
+                <div class="sensor-val"><span id="curtemp">--</span> &deg;C</div>
+            </div>
+            <div>
+                <div class="text-sm">Humidity</div>
+                <div class="sensor-val"><span id="curhum">--</span> %</div>
+            </div>
+        </div>
+
         <!-- Controls Card -->
         <div class="card">
             <h2>Control A/C</h2>
@@ -383,6 +504,43 @@ const char HTML_UI[] = R"raw_html(
                 <button class="btn-blue" style="background:#0ea5e9;" onclick="c(12)">COLD Mode</button>
             </div>
             <p id="cstat" class="text-sm" style="margin-top:15px;"></p>
+        </div>
+        
+        <!-- Temp Automation Card -->
+        <div class="card">
+            <h2>Auto-Trigger Action</h2>
+            <div class="text-sm">Automatically trigger an IR command when the temperature reaches a specific threshold.</div>
+            
+            <div class="flex-row" style="margin-top: 15px;">
+                <select id="a_cond" style="margin:0; flex:1;">
+                    <option value="1">Temp Is &ge;</option>
+                    <option value="0">Temp Is &le;</option>
+                </select>
+                <input type="number" id="a_thresh" step="0.5" style="margin:0; flex:1;" placeholder="25.0">
+                <div class="text-sm" style="margin:0;">&deg;C</div>
+            </div>
+            
+            <select id="a_cmd" style="margin-top: 15px;">
+                <option value="0">AC OFF</option>
+                <option value="1">AC ON</option>
+                <option value="2">Set 19C</option>
+                <option value="3">Set 20C</option>
+                <option value="4">Set 21C</option>
+                <option value="5">Set 22C</option>
+                <option value="6">Set 23C</option>
+                <option value="7">Set 24C</option>
+                <option value="8">Set 25C</option>
+                <option value="9">Set 26C</option>
+                <option value="10">Set 27C</option>
+                <option value="11">Mode HOT</option>
+                <option value="12">Mode COLD</option>
+            </select>
+            
+            <div class="flex-row">
+                <button id="btn_auto_enable" class="btn-gray" onclick="toggleAuto()">Enable</button>
+                <button class="btn-green" onclick="saveAuto()">Save Automation</button>
+            </div>
+            <p id="astat" class="text-sm" style="margin-top:10px;"></p>
         </div>
 
         <!-- Timers Card -->
@@ -442,6 +600,8 @@ const char HTML_UI[] = R"raw_html(
 
     <script>
         let timers = [];
+        let auto_en = false;
+        let firstLoad = true;
         const days = {'-1':'Everyday','0':'Sun','1':'Mon','2':'Tue','3':'Wed','4':'Thu','5':'Fri','6':'Sat'};
         const cmds = {'0':'OFF','1':'ON','2':'19C','3':'20C','4':'21C','5':'22C','6':'23C','7':'24C','8':'25C','9':'26C','10':'27C','11':'HOT','12':'COLD','13':'SRV OFF','14':'SRV ON'};
         
@@ -450,6 +610,36 @@ const char HTML_UI[] = R"raw_html(
             fetch('/ir?cmd='+cmd).then(r=>r.text()).then(t=>{
                 document.getElementById('cstat').innerText = 'Status: ' + t;
                 setTimeout(loadStatus, 600);
+            });
+        }
+        
+        function toggleAuto() {
+            auto_en = !auto_en;
+            updateAutoBtn();
+        }
+        
+        function updateAutoBtn() {
+            let btn = document.getElementById('btn_auto_enable');
+            if(auto_en) {
+                btn.className = 'btn-blue';
+                btn.innerText = 'Enabled (Click Disable)';
+            } else {
+                btn.className = 'btn-gray';
+                btn.innerText = 'Disabled (Click Enable)';
+            }
+        }
+        
+        function saveAuto(){
+            let payload = {
+                en: auto_en ? 1 : 0,
+                t: parseFloat(document.getElementById('a_thresh').value),
+                c: parseInt(document.getElementById('a_cond').value),
+                cmd: parseInt(document.getElementById('a_cmd').value)
+            };
+            document.getElementById('astat').innerText = 'Saving...';
+            fetch('/auto', {method:'POST', body:JSON.stringify(payload)}).then(()=>{
+                document.getElementById('astat').innerText = 'Saved!';
+                setTimeout(() => document.getElementById('astat').innerText='', 2000);
             });
         }
         
@@ -483,6 +673,18 @@ const char HTML_UI[] = R"raw_html(
             fetch('/status').then(r=>r.json()).then(d=>{
                 document.getElementById('curtime').innerText = d.time;
                 document.getElementById('lastcmd').innerText = d.last_cmd;
+                document.getElementById('curtemp').innerText = d.temp.toFixed(1);
+                document.getElementById('curhum').innerText = d.hum.toFixed(1);
+                
+                if(firstLoad && d.auto) {
+                    auto_en = d.auto.en === 1;
+                    document.getElementById('a_thresh').value = d.auto.t;
+                    document.getElementById('a_cond').value = d.auto.c;
+                    document.getElementById('a_cmd').value = d.auto.cmd;
+                    updateAutoBtn();
+                    firstLoad = false;
+                }
+                
                 timers = d.timers || [];
                 renderTimers();
             });
@@ -518,7 +720,7 @@ const char HTML_UI[] = R"raw_html(
             });
         }
 
-        setInterval(loadStatus, 10000);
+        setInterval(loadStatus, 5000);
         window.onload = loadStatus;
     </script>
 </body></html>
@@ -567,6 +769,42 @@ static esp_err_t ir_get_handler(httpd_req_t *req) {
     return ESP_FAIL;
 }
 
+static esp_err_t auto_post_handler(httpd_req_t *req) {
+    char buf[256];
+    int ret, remaining = req->content_len;
+    if (remaining >= (int)sizeof(buf)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Payload too large");
+        return ESP_FAIL;
+    }
+    
+    if ((ret = httpd_req_recv(req, buf, remaining)) <= 0) return ESP_FAIL;
+    buf[ret] = '\0';
+    
+    cJSON *json = cJSON_Parse(buf);
+    if(json) {
+        cJSON *en = cJSON_GetObjectItem(json, "en");
+        cJSON *t = cJSON_GetObjectItem(json, "t");
+        cJSON *c = cJSON_GetObjectItem(json, "c");
+        cJSON *cmd = cJSON_GetObjectItem(json, "cmd");
+        
+        if(en && t && c && cmd) {
+            auto_config.enabled = en->valueint;
+            auto_config.threshold = t->valuedouble;
+            auto_config.condition = c->valueint;
+            auto_config.command = cmd->valueint;
+            
+            auto_condition_met_last = false; // Reset threshold blocker on save
+            save_auto_config();
+        }
+        cJSON_Delete(json);
+        httpd_resp_sendstr(req, "OK");
+    } else {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON parameters provided");
+        return ESP_FAIL;
+    }
+    return ESP_OK;
+}
+
 static esp_err_t status_get_handler(httpd_req_t *req) {
     time_t now = 0;
     time(&now);
@@ -584,6 +822,15 @@ static esp_err_t status_get_handler(httpd_req_t *req) {
     cJSON *root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "time", time_str);
     cJSON_AddStringToObject(root, "last_cmd", last_command_str);
+    cJSON_AddNumberToObject(root, "temp", current_temp);
+    cJSON_AddNumberToObject(root, "hum", current_hum);
+    
+    cJSON *aut = cJSON_CreateObject();
+    cJSON_AddNumberToObject(aut, "en", auto_config.enabled);
+    cJSON_AddNumberToObject(aut, "t", auto_config.threshold);
+    cJSON_AddNumberToObject(aut, "c", auto_config.condition);
+    cJSON_AddNumberToObject(aut, "cmd", auto_config.command);
+    cJSON_AddItemToObject(root, "auto", aut);
     
     cJSON *timers_arr = cJSON_CreateArray();
     if (xSemaphoreTake(timer_mutex, portMAX_DELAY)) {
@@ -744,6 +991,7 @@ void start_web_server() {
             httpd_uri_t uri_ir     = { .uri = "/ir",     .method = HTTP_GET,  .handler = ir_get_handler,     .user_ctx = NULL };
             httpd_uri_t uri_status = { .uri = "/status", .method = HTTP_GET,  .handler = status_get_handler, .user_ctx = NULL };
             httpd_uri_t uri_timers = { .uri = "/timers", .method = HTTP_POST, .handler = timers_post_handler,.user_ctx = NULL };
+            httpd_uri_t uri_auto   = { .uri = "/auto",   .method = HTTP_POST, .handler = auto_post_handler,  .user_ctx = NULL };
             httpd_uri_t uri_switch_ap   = { .uri = "/switch_to_ap",   .method = HTTP_POST, .handler = switch_ap_post_handler,   .user_ctx = NULL };
             httpd_uri_t uri_switch_wifi = { .uri = "/switch_to_wifi", .method = HTTP_POST, .handler = switch_wifi_post_handler, .user_ctx = NULL };
             
@@ -761,6 +1009,7 @@ void start_web_server() {
             httpd_register_uri_handler(server, &uri_ir);
             httpd_register_uri_handler(server, &uri_status);
             httpd_register_uri_handler(server, &uri_timers);
+            httpd_register_uri_handler(server, &uri_auto);
             httpd_register_uri_handler(server, &uri_switch_ap);
             httpd_register_uri_handler(server, &uri_switch_wifi);
             httpd_register_uri_handler(server, &uri_cp1);
@@ -990,7 +1239,11 @@ extern "C" void app_main(void) {
     
     // Resume established logic rules securely stored in NV memory
     load_timers();
+    load_auto_config(); // Load Temp Automation Settings
+    
+    // Start timers and temp polling tasks
     xTaskCreate(timer_task, "timer_task", 4096, NULL, 5, NULL);
+    xTaskCreate(dht_task, "dht_task", 4096, NULL, 5, NULL);
 
     nvs_handle_t my_handle;
     bool has_credentials = false;
