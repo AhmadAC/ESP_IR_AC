@@ -2,9 +2,9 @@ name: Build ESP32-S3 AC Controller
 
 on:
   push:
-    branches: [ "Wifionly", "master" ]
+    branches: [ "startagain", "master" ]
   pull_request:
-    branches: [ "Wifionly", "master" ]
+    branches: [ "startagain", "master" ]
   workflow_dispatch:
 
 jobs:
