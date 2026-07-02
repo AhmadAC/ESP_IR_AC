@@ -51,9 +51,13 @@ void console_read_task(void *pvParameter) {
         int len = read(fd, buf, sizeof(buf));
         if (len > 0) {
             for (int i = 0; i < len; i++) {
-                if (buf[i] == 0x03) { 
-                    execute_command(0); 
-                } else if (buf[i] == 0x04) {
+                if (buf[i] == 0x03) { // Ctrl+C
+                    ESP_LOGW(TAG, "[Sent Ctrl+C - Soft Reboot]");
+                    vTaskDelay(pdMS_TO_TICKS(100));
+                    esp_restart();
+                } else if (buf[i] == 0x04) { // Ctrl+D
+                    ESP_LOGW(TAG, "[Sent Ctrl+D - Soft Reboot]");
+                    vTaskDelay(pdMS_TO_TICKS(100));
                     esp_restart();
                 } else if (buf[i] == '\r' || buf[i] == '\n') {
                     if (cmd_idx > 0) {

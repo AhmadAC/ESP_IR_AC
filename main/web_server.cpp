@@ -11,7 +11,6 @@
 #include "esp_log.h"
 #include "esp_wifi.h"
 
-// Standard libraries required for time, memory, and string parsing
 #include <time.h>
 #include <sys/time.h>
 #include <string.h>
@@ -234,6 +233,19 @@ const char HTML_UI[] = R"raw_html(
         function delAuto(i){ autos.splice(i, 1); renderAutos(); }
 
         function saveAutos(){
+            if (autos.length === 0) {
+                let tStr = document.getElementById('a_thresh').value;
+                if (tStr) {
+                    if (confirm("Your automation list is empty. Would you like to automatically add the currently entered rule before saving?")) {
+                        addAuto();
+                    } else {
+                        return;
+                    }
+                } else {
+                    alert("Please add at least one automation rule to save.");
+                    return;
+                }
+            }
             document.getElementById('astat').innerText = 'Saving...';
             fetch('/auto', {method:'POST', body:JSON.stringify(autos)}).then(()=>{
                 document.getElementById('astat').innerText = 'Saved!';

@@ -47,6 +47,27 @@ void send_uart_ir(const uint8_t* data, size_t data_len) {
     free(frame);
 }
 
+const char* get_command_string(int cmd) {
+    switch (cmd) {
+        case 0: return "AC OFF";
+        case 1: return "AC ON";
+        case 2: return "Set 19C";
+        case 3: return "Set 20C";
+        case 4: return "Set 21C";
+        case 5: return "Set 22C";
+        case 6: return "Set 23C";
+        case 7: return "Set 24C";
+        case 8: return "Set 25C";
+        case 9: return "Set 26C";
+        case 10: return "Set 27C";
+        case 11: return "Mode HOT";
+        case 12: return "Mode COLD";
+        case 13: return "Server OFF";
+        case 14: return "Server ON";
+        default: return "Unknown";
+    }
+}
+
 void execute_command(int cmd) {
     switch (cmd) {
         case 0:  strcpy(last_command_str, "AC OFF"); send_uart_ir(ir_off, ir_off_len); break;

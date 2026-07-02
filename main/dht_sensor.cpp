@@ -7,6 +7,7 @@
 #include "esp_rom_sys.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
+#include <string.h>
 
 static const char *TAG = "DHT";
 float current_temp = 0.0;
@@ -27,7 +28,7 @@ bool read_dht11(float *temp, float *hum) {
     
     gpio_set_direction(DHT_PIN, GPIO_MODE_OUTPUT);
     gpio_set_level(DHT_PIN, 0);
-    vTaskDelay(pdMS_TO_TICKS(20)); // Wake up low signal
+    vTaskDelay(pdMS_TO_TICKS(20)); 
     gpio_set_level(DHT_PIN, 1);
     esp_rom_delay_us(30);
     gpio_set_direction(DHT_PIN, GPIO_MODE_INPUT);
@@ -45,7 +46,7 @@ bool read_dht11(float *temp, float *hum) {
         data[i / 8] <<= 1;
         if (t > 40) data[i / 8] |= 1;
     }
-    portEXIT_CRITICAL(&dht_mux);
+    portENTER_CRITICAL(&dht_mux);
     
     if (data[4] == ((data[0] + data[1] + data[2] + data[3]) & 0xFF)) {
         *hum = data[0] + (data[1] * 0.1);
@@ -65,8 +66,9 @@ void dht_task(void *pvParameter) {
         if (read_dht11(&temp, &hum)) {
             current_temp = temp;
             current_hum = hum;
+            ESP_LOGI(TAG, "Read Success! Temp: %.1f C, Hum: %.1f %%, Active Automations: %d", current_temp, current_hum, num_autos);
             
-            // Handle Automation Triggers
+            // Handle State-Enforcement Level Triggers
             if (xSemaphoreTake(auto_mutex, portMAX_DELAY)) {
                 for (int i = 0; i < num_autos; i++) {
                     bool condition_met = false;
@@ -74,16 +76,21 @@ void dht_task(void *pvParameter) {
                     if (auto_rules[i].condition == 1 && current_temp >= auto_rules[i].threshold) condition_met = true;
                     if (auto_rules[i].condition == 0 && current_temp <= auto_rules[i].threshold) condition_met = true;
                     
-                    if (condition_met && !auto_triggered[i]) {
-                        ESP_LOGI(TAG, "Automation %d Triggered! Temp: %.1f, Thresh: %.1f, Cmd: %d", 
-                                 i, current_temp, auto_rules[i].threshold, auto_rules[i].command);
-                        execute_command(auto_rules[i].command);
+                    if (condition_met) {
+                        const char* target_cmd = get_command_string(auto_rules[i].command);
+                        
+                        // If the target state does not match the last command executed, enforce it
+                        if (strcmp(last_command_str, target_cmd) != 0) {
+                            ESP_LOGW(TAG, "Automation %d matched! Temp %.1f meets rule threshold %.1f. Enforcing state '%s' (Previous was '%s')", 
+                                     i, current_temp, auto_rules[i].threshold, target_cmd, last_command_str);
+                            execute_command(auto_rules[i].command);
+                        }
                     }
-                    
-                    auto_triggered[i] = condition_met;
                 }
                 xSemaphoreGive(auto_mutex);
             }
+        } else {
+            ESP_LOGW(TAG, "Read Failed! Check wires or verify pull-up resistor on GPIO %d.", DHT_PIN);
         }
     }
 }
